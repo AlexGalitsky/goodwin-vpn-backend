@@ -88,3 +88,19 @@ func TestRealityGRPCLink(t *testing.T) {
 		t.Fatalf("sni %s", got.Body)
 	}
 }
+
+func TestTTLink(t *testing.T) {
+	got, err := Render(User{Status: "active"}, []NodeLine{{
+		Name:   "Titan",
+		Host:   "titan.goodwin.website",
+		Family: "tt",
+		Port:   8443,
+		TTLink: "tt://?AAAA",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(got.Body) != "tt://?AAAA" {
+		t.Fatalf("body %s", got.Body)
+	}
+}

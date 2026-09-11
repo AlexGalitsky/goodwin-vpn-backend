@@ -620,15 +620,18 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 
 	wantVLESS := stack.HasFamily(n.Families, stack.FamilyVLESS)
 	wantHy2 := stack.HasFamily(n.Families, stack.FamilyHy2)
-	if wantHy2 && strings.TrimSpace(n.Hostname) == "" {
-		writeErr(w, http.StatusBadRequest, "hostname required for hy2 (Let's Encrypt SAN)")
+	wantTT := stack.HasFamily(n.Families, stack.FamilyTT)
+	if (wantHy2 || wantTT) && strings.TrimSpace(n.Hostname) == "" {
+		writeErr(w, http.StatusBadRequest, "hostname required for hy2/tt (Let's Encrypt SAN)")
 		return
 	}
 
 	clients := []desired.VLESSClient{}
 	hy2Users := []desired.Hy2User{}
+	ttUsers := []desired.TTUser{}
 	seenVless := map[string]bool{}
 	seenHy2 := map[string]bool{}
+	seenTT := map[string]bool{}
 	for _, gid := range gids {
 		g, err := s.store.Group(r.Context(), gid)
 		if err != nil {
@@ -655,6 +658,15 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 				}
 				seenHy2[u.Hy2Password] = true
 				hy2Users = append(hy2Users, desired.Hy2User{ID: u.ID.String(), Password: u.Hy2Password})
+			}
+		}
+		if wantTT && stack.HasFamily(g.Protocols, stack.FamilyTT) {
+			for _, u := range users {
+				if strings.TrimSpace(u.TTUser) == "" || strings.TrimSpace(u.TTPassword) == "" || seenTT[u.TTUser] {
+					continue
+				}
+				seenTT[u.TTUser] = true
+				ttUsers = append(ttUsers, desired.TTUser{ID: u.ID.String(), Username: u.TTUser, Password: u.TTPassword})
 			}
 		}
 	}
@@ -689,8 +701,25 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 			Users:    hy2Users,
 		}
 	}
-	if st.VLESS == nil && st.Hy2 == nil {
-		writeErr(w, http.StatusBadRequest, "no vless/hy2 users in this node's groups — create a user, then Apply again")
+	if wantTT && len(ttUsers) > 0 {
+		tport := ports.TT
+		if tport <= 0 {
+			tport = 8443
+		}
+		advHost := strings.TrimSpace(n.Hostname)
+		if advHost == "" {
+			advHost = n.IPv4
+		}
+		st.TT = &desired.TT{
+			Port:      tport,
+			Hostname:  n.Hostname,
+			Advertise: fmt.Sprintf("%s:%d", advHost, tport),
+			Name:      n.Name,
+			Users:     ttUsers,
+		}
+	}
+	if st.VLESS == nil && st.Hy2 == nil && st.TT == nil {
+		writeErr(w, http.StatusBadRequest, "no vless/hy2/tt users in this node's groups — create a user, then Apply again")
 		return
 	}
 
@@ -708,6 +737,9 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 	if res.Hy2Listen {
 		fams = append(fams, stack.FamilyHy2)
 	}
+	if res.TTListen && len(res.TTLinks) > 0 {
+		fams = append(fams, stack.FamilyTT)
+	}
 	n.AppliedFamilies = fams
 	switch {
 	case len(fams) == 0:
@@ -721,12 +753,26 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if res.TTListen && len(res.TTLinks) > 0 {
+		links := map[uuid.UUID]string{}
+		for _, l := range res.TTLinks {
+			id, err := uuid.Parse(l.UserID)
+			if err != nil {
+				continue
+			}
+			links[id] = l.Link
+		}
+		_ = s.store.ReplaceTTLinks(r.Context(), n.ID, links)
+	} else if !wantTT {
+		_ = s.store.DeleteTTLinksForNode(r.Context(), n.ID)
+	}
 	_ = s.store.Audit(r.Context(), "admin", "apply", &n.ID, res.Detail)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"node_status": n.Status,
 		"apply":       res,
 		"clients":     len(clients),
 		"hy2_users":   len(hy2Users),
+		"tt_users":    len(ttUsers),
 	})
 }
 
@@ -948,6 +994,13 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 			}
 			if fam == stack.FamilyVLESS && rk != nil {
 				line.Reality = rk
+			}
+			if fam == stack.FamilyTT {
+				link, err := s.store.TTLink(ctx, n.ID, u.ID)
+				if err != nil || strings.TrimSpace(link) == "" {
+					continue
+				}
+				line.TTLink = link
 			}
 			lines = append(lines, line)
 		}

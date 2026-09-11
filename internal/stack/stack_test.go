@@ -26,6 +26,9 @@ func TestNeedsHostname(t *testing.T) {
 	if !NeedsHostname([]string{FamilyVLESS, FamilyHy2}) {
 		t.Fatal("hy2 needs hostname")
 	}
+	if NeedsHostname([]string{FamilyTT}) != true {
+		t.Fatal("tt needs hostname")
+	}
 	if NeedsHostname([]string{FamilyVLESS}) {
 		t.Fatal("stealth does not")
 	}

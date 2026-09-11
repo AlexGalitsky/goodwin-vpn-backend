@@ -161,13 +161,15 @@ Login; Nodes; enroll; stack+Apply log; **exec на ноде (dev)**; Groups; Use
 | **P2** | VLESS REALITY на одной VM | **готово** — grpc REALITY, dest Cloudflare, Connect с preview, IP = titan |
 | **P3** | Users + Groups + URL | Refresh в Servers подтягивает имя/disable; `https://…/sub/{token}` |
 | **P4** | Две ноды, разные группы | **готово** — разные ссылки; мёртвый agent пропадает из `/sub` |
-| **P5** | Hy2 на 443/udp рядом с REALITY | **в коде** — Apply ставит официальный Hysteria, SNI = SAN |
-| **P6** | TT на 8443, deeplink из endpoint | Три строки в одной подписке, форма ловит конфликт 443 |
+| **P5** | Hy2 на 443/udp рядом с REALITY | **готово** — Connect hy2, SNI = SAN |
+| **P6** | TT на 8443, deeplink из endpoint | **в коде** — Apply ставит официальный endpoint, `/sub` отдаёт `tt://?` |
 | **P7** | Квоты, expire, revoke, аудит Apply | userinfo + 404/пусто после revoke |
 
 Не начинать Hy2/TT, пока P2–P3 не коннектятся с телефона по подписке.
 
 **P2 в коде:** Apply ставит Xray VLESS+REALITY **gRPC** на 443, dest/SNI `www.cloudflare.com`. Preview только после `ready`.
+
+**P6 в коде:** Apply качает `trusttunnel_endpoint` v1.1.0, listen 8443 TCP+UDP, Let's Encrypt SAN, deeplink `-c user -a host:8443 --format deeplink`. Validate не даёт TT делить 443 с VLESS/Hy2.
 
 **P5 в коде:** Apply качает официальный Hysteria, UDP 443 + Let's Encrypt `live/{hostname}`, `/sub` отдаёт `hysteria2://password@host?sni=hostname` без obfs. Повторный bootstrap ноды сохраняет token.
 

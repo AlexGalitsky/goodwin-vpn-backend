@@ -10,12 +10,12 @@ import (
 )
 
 type Headers struct {
-	Title          string
-	IntervalHours  int
-	Upload         int64
-	Download       int64
-	Total          int64
-	ExpireUnix     int64
+	Title         string
+	IntervalHours int
+	Upload        int64
+	Download      int64
+	Total         int64
+	ExpireUnix    int64
 }
 
 type User struct {
@@ -33,12 +33,13 @@ type User struct {
 }
 
 type NodeLine struct {
-	Name     string
-	Host     string
-	Family   string
-	Port     int
-	Reality  *Reality
-	Hy2SNI   string
+	Name    string
+	Host    string
+	Family  string
+	Port    int
+	Reality *Reality
+	Hy2SNI  string
+	TTLink  string
 }
 
 type Reality struct {
@@ -167,6 +168,9 @@ func shareLink(user User, line NodeLine) (string, error) {
 		pass := url.PathEscape(user.Hy2Password)
 		return fmt.Sprintf("hysteria2://%s@%s:%d?%s#%s", pass, host, port, q.Encode(), frag), nil
 	case stack.FamilyTT:
+		if link := strings.TrimSpace(line.TTLink); link != "" {
+			return link, nil
+		}
 		if strings.TrimSpace(user.TTLink) != "" {
 			return strings.TrimSpace(user.TTLink), nil
 		}

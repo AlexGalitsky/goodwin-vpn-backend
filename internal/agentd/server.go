@@ -17,6 +17,8 @@ import (
 	"website.goodwin.vpn/plane/internal/execcmd"
 	"website.goodwin.vpn/plane/internal/hy2conf"
 	"website.goodwin.vpn/plane/internal/hy2run"
+	"website.goodwin.vpn/plane/internal/ttconf"
+	"website.goodwin.vpn/plane/internal/ttrun"
 	"website.goodwin.vpn/plane/internal/xrayconf"
 	"website.goodwin.vpn/plane/internal/xrayrun"
 )
@@ -69,6 +71,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	host, _ := os.Hostname()
 	hy2Port := hy2run.ReadPortFile(filepath.Join(s.cfg.Prefix, "hy2.port"))
+	ttPort := ttrun.ReadPortFile(filepath.Join(s.cfg.Prefix, "trusttunnel", "tt.port"))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":          true,
 		"hostname":    host,
@@ -76,6 +79,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"version":     s.cfg.Version,
 		"xray_listen": xrayrun.Listening(443),
 		"hy2_listen":  hy2Port > 0 && hy2run.Listening(hy2Port),
+		"tt_listen":   ttPort > 0 && ttrun.Listening(),
 	})
 }
 
@@ -110,8 +114,8 @@ func (s *Server) desired(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if st.VLESS == nil && st.Hy2 == nil {
-		http.Error(w, "vless or hy2 required", http.StatusBadRequest)
+	if st.VLESS == nil && st.Hy2 == nil && st.TT == nil {
+		http.Error(w, "vless, hy2, or tt required", http.StatusBadRequest)
 		return
 	}
 	res := desired.ApplyResult{}
@@ -133,7 +137,7 @@ func (s *Server) desired(w http.ResponseWriter, r *http.Request) {
 		got, err := applyHy2(r.Context(), s.cfg.Prefix, *st.Hy2)
 		if err != nil {
 			log.Printf("apply hy2: %v", err)
-			if st.VLESS == nil {
+			if st.VLESS == nil && st.TT == nil {
 				writeJSON(w, http.StatusInternalServerError, desired.ApplyResult{OK: false, Detail: err.Error()})
 				return
 			}
@@ -146,8 +150,26 @@ func (s *Server) desired(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if st.TT != nil {
+		got, err := applyTT(r.Context(), s.cfg.Prefix, *st.TT)
+		if err != nil {
+			log.Printf("apply tt: %v", err)
+			if st.VLESS == nil && st.Hy2 == nil {
+				writeJSON(w, http.StatusInternalServerError, desired.ApplyResult{OK: false, Detail: err.Error()})
+				return
+			}
+			parts = append(parts, "tt: "+err.Error())
+		} else {
+			res.TTListen = got.TTListen
+			res.TTVersion = got.TTVersion
+			res.TTLinks = got.TTLinks
+			if got.Detail != "" {
+				parts = append(parts, got.Detail)
+			}
+		}
+	}
 	res.Detail = strings.Join(parts, "; ")
-	res.OK = (st.VLESS == nil || res.XrayListen) && (st.Hy2 == nil || res.Hy2Listen)
+	res.OK = (st.VLESS == nil || res.XrayListen) && (st.Hy2 == nil || res.Hy2Listen) && (st.TT == nil || res.TTListen)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -249,6 +271,92 @@ func applyHy2(ctx context.Context, prefix string, h desired.Hy2) (desired.ApplyR
 		Hy2Listen:  listen,
 		Hy2Version: hy2run.Version(bin),
 		Detail:     cfgPath,
+	}, nil
+}
+
+func applyTT(ctx context.Context, prefix string, t desired.TT) (desired.ApplyResult, error) {
+	if t.Port <= 0 {
+		t.Port = 8443
+	}
+	if strings.TrimSpace(t.Hostname) == "" {
+		return desired.ApplyResult{}, fmt.Errorf("tt hostname required (Let's Encrypt SAN)")
+	}
+	cert, key := t.Cert, t.Key
+	if cert == "" || key == "" {
+		c, k := ttconf.CertPaths(t.Hostname)
+		if cert == "" {
+			cert = c
+		}
+		if key == "" {
+			key = k
+		}
+	}
+	if _, err := os.Stat(cert); err != nil {
+		return desired.ApplyResult{}, fmt.Errorf("tt cert missing %s — issue Let's Encrypt with CERT_DOMAIN=%s", cert, t.Hostname)
+	}
+	if _, err := os.Stat(key); err != nil {
+		return desired.ApplyResult{}, fmt.Errorf("tt key missing %s", key)
+	}
+	if len(t.Users) == 0 {
+		return desired.ApplyResult{}, fmt.Errorf("tt users required")
+	}
+	dir := filepath.Join(prefix, "trusttunnel")
+	bin, err := ttrun.EnsureBinary(ctx, dir)
+	if err != nil {
+		return desired.ApplyResult{}, err
+	}
+	credPath := filepath.Join(dir, "credentials.toml")
+	cred, err := ttconf.Credentials(t.Users)
+	if err != nil {
+		return desired.ApplyResult{}, err
+	}
+	if err := ttrun.WriteFile(credPath, cred, 0o600); err != nil {
+		return desired.ApplyResult{}, err
+	}
+	vpnPath := filepath.Join(dir, "vpn.toml")
+	if err := ttrun.WriteFile(vpnPath, ttconf.VPN(t.Port, credPath), 0o600); err != nil {
+		return desired.ApplyResult{}, err
+	}
+	hostsPath := filepath.Join(dir, "hosts.toml")
+	if err := ttrun.WriteFile(hostsPath, ttconf.Hosts(t.Hostname, cert, key), 0o600); err != nil {
+		return desired.ApplyResult{}, err
+	}
+	if err := ttrun.WriteFile(filepath.Join(dir, "tt.port"), []byte(fmt.Sprintf("%d\n", t.Port)), 0o644); err != nil {
+		return desired.ApplyResult{}, err
+	}
+	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		if err := ttrun.InstallUnit(bin, dir, vpnPath, hostsPath); err != nil {
+			return desired.ApplyResult{}, err
+		}
+	}
+	time.Sleep(800 * time.Millisecond)
+	listen := ttrun.Listening()
+	if !listen && runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		return desired.ApplyResult{}, fmt.Errorf("trusttunnel did not become active")
+	}
+	advertise := strings.TrimSpace(t.Advertise)
+	if advertise == "" {
+		advertise = fmt.Sprintf("%s:%d", t.Hostname, t.Port)
+	}
+	display := strings.TrimSpace(t.Name)
+	if display == "" {
+		display = t.Hostname
+	}
+	var links []desired.TTLink
+	for _, u := range t.Users {
+		link, err := ttrun.MintDeeplink(ctx, bin, vpnPath, hostsPath, u.Username, advertise, display)
+		if err != nil {
+			return desired.ApplyResult{}, err
+		}
+		links = append(links, desired.TTLink{UserID: u.ID, Username: u.Username, Link: link})
+	}
+	ok := listen || runtime.GOOS != "linux" || os.Geteuid() != 0
+	return desired.ApplyResult{
+		OK:        ok,
+		TTListen:  ok,
+		TTVersion: ttrun.VersionBin(bin),
+		TTLinks:   links,
+		Detail:    vpnPath,
 	}, nil
 }
 

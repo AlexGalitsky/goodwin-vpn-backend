@@ -80,4 +80,13 @@ curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/ma
 4. Admin → Nodes → Apply на titan и mimas. Status `ready`, Preview содержит `hysteria2://…` с `sni=` hostname.
 5. В `app/` Refresh и Connect по Hy2. VLESS на тех же нодах должен продолжать работать.
 
+## TrustTunnel (P6)
+
+TT на **8443** (TCP+UDP). 443 остаётся REALITY+Hy2 — форма/API не дают посадить TT на тот же порт.
+
+1. Обновить панель и **обе** ноды (token сохранится) — те же bootstrap-команды, что в P5.
+2. TCP **и** UDP 8443 должны быть открыты.
+3. Apply на titan и mimas. Preview: третья строка `tt://?…` (официальный deeplink, не self-signed).
+4. В `app/` Refresh и Connect по TrustTunnel. VLESS и Hy2 не должны сломаться.
+
 `allow_exec` is on by default for development. Turn off with `--no-exec` before giving the panel to anyone else.

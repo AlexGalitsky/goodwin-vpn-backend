@@ -410,3 +410,37 @@ func (s *Store) SeedDev(ctx context.Context) error {
 	})
 	return err
 }
+
+func (s *Store) ReplaceTTLinks(ctx context.Context, nodeID uuid.UUID, links map[uuid.UUID]string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM tt_links WHERE node_id=$1`, nodeID); err != nil {
+		return err
+	}
+	for uid, link := range links {
+		if strings.TrimSpace(link) == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO tt_links (node_id, user_id, link) VALUES ($1,$2,$3)`, nodeID, uid, link); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) DeleteTTLinksForNode(ctx context.Context, nodeID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM tt_links WHERE node_id=$1`, nodeID)
+	return err
+}
+
+func (s *Store) TTLink(ctx context.Context, nodeID, userID uuid.UUID) (string, error) {
+	var link string
+	err := s.pool.QueryRow(ctx, `SELECT link FROM tt_links WHERE node_id=$1 AND user_id=$2`, nodeID, userID).Scan(&link)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return link, err
+}
