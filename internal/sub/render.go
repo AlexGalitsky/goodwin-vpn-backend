@@ -42,11 +42,13 @@ type NodeLine struct {
 }
 
 type Reality struct {
-	SNI       string
-	PublicKey string
-	ShortID   string
-	Flow      string
-	FP        string
+	SNI         string
+	PublicKey   string
+	ShortID     string
+	Flow        string
+	FP          string
+	Network     string
+	ServiceName string
 }
 
 type Result struct {
@@ -111,7 +113,14 @@ func shareLink(user User, line NodeLine) (string, error) {
 		}
 		q := url.Values{}
 		q.Set("encryption", "none")
-		q.Set("type", "tcp")
+		network := "tcp"
+		if line.Reality != nil && line.Reality.PublicKey != "" {
+			network = "grpc"
+			if line.Reality.Network != "" {
+				network = line.Reality.Network
+			}
+		}
+		q.Set("type", network)
 		if line.Reality != nil && line.Reality.PublicKey != "" {
 			q.Set("security", "reality")
 			q.Set("pbk", line.Reality.PublicKey)
@@ -126,11 +135,17 @@ func shareLink(user User, line NodeLine) (string, error) {
 				fp = "chrome"
 			}
 			q.Set("fp", fp)
-			flow := line.Reality.Flow
-			if flow == "" {
-				flow = "xtls-rprx-vision"
+			if network == "grpc" {
+				svc := line.Reality.ServiceName
+				if svc == "" {
+					svc = "goodwin"
+				}
+				q.Set("serviceName", svc)
+				q.Set("mode", "gun")
 			}
-			q.Set("flow", flow)
+			if line.Reality.Flow != "" {
+				q.Set("flow", line.Reality.Flow)
+			}
 		} else {
 			q.Set("security", "none")
 		}

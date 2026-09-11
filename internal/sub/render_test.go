@@ -56,3 +56,35 @@ func TestHy2Link(t *testing.T) {
 		t.Fatal("must not emit obfs")
 	}
 }
+
+func TestRealityGRPCLink(t *testing.T) {
+	got, err := Render(User{
+		VlessUUID: "11111111-2222-3333-4444-555555555555",
+		Status:    "active",
+	}, []NodeLine{{
+		Name:   "Titan",
+		Host:   "titan.example.com",
+		Family: "vless",
+		Port:   443,
+		Reality: &Reality{
+			SNI:         "www.cloudflare.com",
+			PublicKey:   "PUBLIC",
+			ShortID:     "abcd1234",
+			Network:     "grpc",
+			ServiceName: "goodwin",
+			FP:          "chrome",
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Body, "type=grpc") || !strings.Contains(got.Body, "serviceName=goodwin") {
+		t.Fatalf("body %s", got.Body)
+	}
+	if strings.Contains(got.Body, "flow=") {
+		t.Fatal("grpc REALITY must not set vision flow")
+	}
+	if !strings.Contains(got.Body, "sni=www.cloudflare.com") {
+		t.Fatalf("sni %s", got.Body)
+	}
+}

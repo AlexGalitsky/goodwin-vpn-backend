@@ -24,4 +24,7 @@ func TestGenerate(t *testing.T) {
 	if len(k.ShortID) != 8 {
 		t.Fatalf("shortId %q", k.ShortID)
 	}
+	if k.Dest != DefaultDest || k.SNI != DefaultSNI {
+		t.Fatalf("dest %s sni %s", k.Dest, k.SNI)
+	}
 }

@@ -32,6 +32,18 @@ func TestBuild(t *testing.T) {
 		t.Fatalf("inbounds %d", len(inbounds))
 	}
 	in := inbounds[0].(map[string]any)
+	stream := in["streamSettings"].(map[string]any)
+	if stream["network"] != "grpc" {
+		t.Fatalf("network %v", stream["network"])
+	}
+	if _, ok := stream["grpcSettings"]; !ok {
+		t.Fatal("missing grpcSettings")
+	}
+	clients := in["settings"].(map[string]any)["clients"].([]any)
+	c0 := clients[0].(map[string]any)
+	if _, ok := c0["flow"]; ok {
+		t.Fatalf("grpc clients must not set vision flow: %+v", c0)
+	}
 	sniff := in["sniffing"].(map[string]any)
 	if sniff["routeOnly"] != true {
 		t.Fatalf("sniffing %+v", sniff)

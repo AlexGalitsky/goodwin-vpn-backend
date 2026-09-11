@@ -7,9 +7,11 @@ type State struct {
 }
 
 type VLESS struct {
-	Port    int             `json:"port"`
-	Reality reality.Keys    `json:"reality"`
-	Clients []VLESSClient   `json:"clients"`
+	Port        int           `json:"port"`
+	Network     string        `json:"network,omitempty"`
+	ServiceName string        `json:"service_name,omitempty"`
+	Reality     reality.Keys  `json:"reality"`
+	Clients     []VLESSClient `json:"clients"`
 }
 
 type VLESSClient struct {

@@ -1,16 +1,17 @@
 package reality
 
 import (
-	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+
+	"golang.org/x/crypto/curve25519"
 )
 
 const (
-	DefaultDest = "www.microsoft.com:443"
-	DefaultSNI  = "www.microsoft.com"
+	DefaultDest = "www.cloudflare.com:443"
+	DefaultSNI  = "www.cloudflare.com"
 )
 
 type Keys struct {
@@ -22,7 +23,14 @@ type Keys struct {
 }
 
 func Generate() (Keys, error) {
-	k, err := ecdh.X25519().GenerateKey(rand.Reader)
+	var priv [32]byte
+	if _, err := rand.Read(priv[:]); err != nil {
+		return Keys{}, err
+	}
+	priv[0] &= 248
+	priv[31] &= 127
+	priv[31] |= 64
+	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
 	if err != nil {
 		return Keys{}, err
 	}
@@ -31,8 +39,8 @@ func Generate() (Keys, error) {
 		return Keys{}, err
 	}
 	return Keys{
-		PrivateKey: base64.RawURLEncoding.EncodeToString(k.Bytes()),
-		PublicKey:  base64.RawURLEncoding.EncodeToString(k.PublicKey().Bytes()),
+		PrivateKey: base64.RawURLEncoding.EncodeToString(priv[:]),
+		PublicKey:  base64.RawURLEncoding.EncodeToString(pub),
 		ShortID:    hex.EncodeToString(sid),
 		Dest:       DefaultDest,
 		SNI:        DefaultSNI,
@@ -47,4 +55,8 @@ func (k Keys) Validate() error {
 		return fmt.Errorf("REALITY dest/sni required")
 	}
 	return nil
+}
+
+func (k Keys) MatchesDefaults() bool {
+	return k.Dest == DefaultDest && k.SNI == DefaultSNI
 }

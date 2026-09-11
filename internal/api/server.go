@@ -25,6 +25,7 @@ import (
 	"website.goodwin.vpn/plane/internal/stack"
 	"website.goodwin.vpn/plane/internal/store"
 	"website.goodwin.vpn/plane/internal/sub"
+	"website.goodwin.vpn/plane/internal/xrayconf"
 )
 
 type Config struct {
@@ -577,7 +578,6 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 			clients = append(clients, desired.VLESSClient{
 				ID:    u.VlessUUID,
 				Email: u.ID.String(),
-				Flow:  "xtls-rprx-vision",
 			})
 		}
 	}
@@ -586,9 +586,11 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := desired.State{VLESS: &desired.VLESS{
-		Port:    port,
-		Reality: keys,
-		Clients: clients,
+		Port:        port,
+		Network:     "grpc",
+		ServiceName: xrayconf.GRPCService,
+		Reality:     keys,
+		Clients:     clients,
 	}}
 	res, err := c.Apply(r.Context(), st)
 	if err != nil {
@@ -626,7 +628,9 @@ func (s *Server) ensureReality(ctx context.Context) (reality.Keys, error) {
 		if k.SNI == "" {
 			k.SNI = reality.DefaultSNI
 		}
-		return k, k.Validate()
+		if k.MatchesDefaults() {
+			return k, k.Validate()
+		}
 	}
 	k, err := reality.Generate()
 	if err != nil {
@@ -658,11 +662,12 @@ func (s *Server) realityShare(ctx context.Context) (*sub.Reality, error) {
 		sni = reality.DefaultSNI
 	}
 	return &sub.Reality{
-		SNI:       sni,
-		PublicKey: pub,
-		ShortID:   sid,
-		Flow:      "xtls-rprx-vision",
-		FP:        "chrome",
+		SNI:         sni,
+		PublicKey:   pub,
+		ShortID:     sid,
+		FP:          "chrome",
+		Network:     "grpc",
+		ServiceName: xrayconf.GRPCService,
 	}, nil
 }
 
