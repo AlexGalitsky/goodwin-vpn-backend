@@ -22,7 +22,7 @@ Dev user after seed: `http://127.0.0.1:8080/sub/dev-sub-token` (404 until a node
 На чистом Debian/Ubuntu, **root**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo CERT_DOMAIN=titan.goodwin.website bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=titan.goodwin.website bash
 ```
 
 Скрипт ставит Node.js 22, Go, клонирует репо, собирает agent и вызывает `tools/install_vpn_node.mjs`. Печатает token для админки. `CERT_DOMAIN` — Let's Encrypt на этот hostname (порт 80). Saturn / админку скрипт не ставит.
@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/ma
 Приватный репо:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo GITHUB_TOKEN=ghp_... CERT_DOMAIN=titan.goodwin.website bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env GITHUB_TOKEN=ghp_... CERT_DOMAIN=titan.goodwin.website bash
 ```
 
 Или локальная сборка:
