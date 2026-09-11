@@ -1,0 +1,175 @@
+package sub
+
+import (
+	"fmt"
+	"net/url"
+	"strings"
+	"time"
+
+	"website.goodwin.vpn/plane/internal/stack"
+)
+
+type Headers struct {
+	Title          string
+	IntervalHours  int
+	Upload         int64
+	Download       int64
+	Total          int64
+	ExpireUnix     int64
+}
+
+type User struct {
+	DisplayName string
+	VlessUUID   string
+	Hy2Password string
+	TTUser      string
+	TTPassword  string
+	TTLink      string
+	Upload      int64
+	Download    int64
+	Total       int64
+	Expire      *time.Time
+	Status      string
+}
+
+type NodeLine struct {
+	Name     string
+	Host     string
+	Family   string
+	Port     int
+	Reality  *Reality
+	Hy2SNI   string
+}
+
+type Reality struct {
+	SNI       string
+	PublicKey string
+	ShortID   string
+	Flow      string
+	FP        string
+}
+
+type Result struct {
+	Body    string
+	Headers Headers
+}
+
+func Render(user User, lines []NodeLine) (Result, error) {
+	if user.Status != "" && user.Status != "active" {
+		return Result{}, fmt.Errorf("user is not active")
+	}
+	var body []string
+	for _, line := range lines {
+		s, err := shareLink(user, line)
+		if err != nil {
+			return Result{}, err
+		}
+		if s != "" {
+			body = append(body, s)
+		}
+	}
+	if len(body) == 0 {
+		return Result{}, fmt.Errorf("no share links")
+	}
+	h := Headers{
+		Title:         strings.TrimSpace(user.DisplayName),
+		IntervalHours: 24,
+		Upload:        user.Upload,
+		Download:      user.Download,
+		Total:         user.Total,
+	}
+	if h.Title == "" {
+		h.Title = "Goodwin"
+	}
+	if user.Expire != nil && !user.Expire.IsZero() {
+		h.ExpireUnix = user.Expire.UTC().Unix()
+	}
+	return Result{
+		Body:    strings.Join(body, "\n") + "\n",
+		Headers: h,
+	}, nil
+}
+
+func shareLink(user User, line NodeLine) (string, error) {
+	host := strings.TrimSpace(line.Host)
+	if host == "" {
+		return "", fmt.Errorf("node %q missing host", line.Name)
+	}
+	name := strings.TrimSpace(line.Name)
+	if name == "" {
+		name = host
+	}
+	frag := url.QueryEscape(name)
+	switch line.Family {
+	case stack.FamilyVLESS:
+		if strings.TrimSpace(user.VlessUUID) == "" {
+			return "", nil
+		}
+		port := line.Port
+		if port <= 0 {
+			port = 443
+		}
+		q := url.Values{}
+		q.Set("encryption", "none")
+		q.Set("type", "tcp")
+		if line.Reality != nil && line.Reality.PublicKey != "" {
+			q.Set("security", "reality")
+			q.Set("pbk", line.Reality.PublicKey)
+			q.Set("sid", line.Reality.ShortID)
+			sni := line.Reality.SNI
+			if sni == "" {
+				sni = host
+			}
+			q.Set("sni", sni)
+			fp := line.Reality.FP
+			if fp == "" {
+				fp = "chrome"
+			}
+			q.Set("fp", fp)
+			flow := line.Reality.Flow
+			if flow == "" {
+				flow = "xtls-rprx-vision"
+			}
+			q.Set("flow", flow)
+		} else {
+			q.Set("security", "none")
+		}
+		return fmt.Sprintf("vless://%s@%s:%d?%s#%s", user.VlessUUID, host, port, q.Encode(), frag), nil
+	case stack.FamilyHy2:
+		if strings.TrimSpace(user.Hy2Password) == "" {
+			return "", nil
+		}
+		port := line.Port
+		if port <= 0 {
+			port = 443
+		}
+		q := url.Values{}
+		sni := line.Hy2SNI
+		if sni == "" {
+			sni = host
+		}
+		q.Set("sni", sni)
+		pass := url.PathEscape(user.Hy2Password)
+		return fmt.Sprintf("hysteria2://%s@%s:%d?%s#%s", pass, host, port, q.Encode(), frag), nil
+	case stack.FamilyTT:
+		if strings.TrimSpace(user.TTLink) != "" {
+			return strings.TrimSpace(user.TTLink), nil
+		}
+		return "", nil
+	default:
+		return "", fmt.Errorf("unknown family %q", line.Family)
+	}
+}
+
+func WriteHeaders(dst map[string]string, h Headers) {
+	if h.Title != "" {
+		dst["profile-title"] = h.Title
+	}
+	if h.IntervalHours > 0 {
+		dst["profile-update-interval"] = fmt.Sprintf("%d", h.IntervalHours)
+	}
+	dst["subscription-userinfo"] = fmt.Sprintf(
+		"upload=%d; download=%d; total=%d; expire=%d",
+		h.Upload, h.Download, h.Total, h.ExpireUnix,
+	)
+}

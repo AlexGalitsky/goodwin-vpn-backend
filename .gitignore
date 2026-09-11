@@ -1,0 +1,12 @@
+.env
+.env.local
+/bin/
+/dist/
+/admin/dist/
+/admin/node_modules/
+admin/tsconfig.tsbuildinfo
+*.exe
+agent.json
+.DS_Store
+coverage.out
+/tmp/
