@@ -227,6 +227,7 @@ export default function App() {
       {tab === "tools" && (
         <div className="grid">
           <RealitySettings onError={setErr} />
+          <CollectTraffic onError={setErr} />
           <Exec onError={setErr} />
           <AuditLog onError={setErr} />
         </div>
@@ -746,6 +747,7 @@ function Users({ onError }: { onError: (s: string) => void }) {
               <th>Имя</th>
               <th>Группа</th>
               <th>Статус</th>
+              <th>Трафик</th>
               <th>Срок</th>
               <th></th>
             </tr>
@@ -753,7 +755,8 @@ function Users({ onError }: { onError: (s: string) => void }) {
           <tbody>
             {filtered.map((u) => {
               const st = statusPill(u.Status);
-              const expired = u.Status === "active" && expireLabel(u.Expire) === "истёк";
+              const quotaDone = u.Total > 0 && u.Upload + u.Download >= u.Total;
+              const expired = u.Status === "active" && (expireLabel(u.Expire) === "истёк" || quotaDone);
               return (
                 <tr key={u.ID}>
                   <td>
@@ -762,7 +765,13 @@ function Users({ onError }: { onError: (s: string) => void }) {
                   </td>
                   <td className="muted">{groups.find((g) => g.ID === u.GroupID)?.Name || "—"}</td>
                   <td>
-                    <span className={`pill ${expired ? "warn" : st.cls}`}>{expired ? "истёк" : st.text}</span>
+                    <span className={`pill ${expired ? "warn" : st.cls}`}>
+                      {expired ? (quotaDone ? "квота" : "истёк") : st.text}
+                    </span>
+                  </td>
+                  <td className="muted">
+                    {bytesToGiB(u.Upload + u.Download)}
+                    {u.Total ? ` / ${bytesToGiB(u.Total)}` : " / ∞"} GiB
                   </td>
                   <td className="muted">{expireLabel(u.Expire)}</td>
                   <td>
@@ -820,6 +829,10 @@ function UserDetail({
   return (
     <div className="card grid" style={{ marginTop: 12 }}>
       <div className="muted">{u.Status === "revoked" ? "Отозван — старый URL даёт 404." : u.sub_url}</div>
+      <div className="muted">
+        VLESS: {bytesToGiB(u.Upload + u.Download)}
+        {u.Total ? ` / ${bytesToGiB(u.Total)}` : " / ∞"} GiB (Hy2/TT не считаются)
+      </div>
       <div className="row">
         <label>
           Имя
@@ -1217,6 +1230,36 @@ function RealitySettings({ onError }: { onError: (s: string) => void }) {
       </button>
       {saved ? <p className="ok">{saved}</p> : null}
     </form>
+  );
+}
+
+function CollectTraffic({ onError }: { onError: (s: string) => void }) {
+  const [out, setOut] = useState("");
+  return (
+    <div className="card grid">
+      <h2>Трафик VLESS</h2>
+      <p className="muted">
+        Plane забирает Xray statsquery с нод каждую минуту. Hy2/TT не входят. После квоты — пустое /sub и Apply.
+      </p>
+      <button
+        type="button"
+        onClick={async () => {
+          setOut("");
+          try {
+            const res = await api<{ users_updated: number; bytes_added: number; applied_nodes: number }>(
+              "/v1/traffic/collect",
+              { method: "POST", body: "{}" },
+            );
+            setOut(`обновлено ${res.users_updated}, +${res.bytes_added} байт, apply ${res.applied_nodes}`);
+          } catch (e) {
+            onError(catchErr(e, "трафик"));
+          }
+        }}
+      >
+        Собрать сейчас
+      </button>
+      {out ? <p className="ok">{out}</p> : null}
+    </div>
   );
 }
 

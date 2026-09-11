@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -34,6 +35,13 @@ func main() {
 	})
 	addr := api.ParseListen(getenv("LISTEN", ":8080"))
 	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	pollEvery := time.Minute
+	if n, err := strconv.Atoi(getenv("TRAFFIC_POLL_SEC", "60")); err == nil && n > 0 {
+		pollEvery = time.Duration(n) * time.Second
+	}
+	pollCtx, pollCancel := context.WithCancel(context.Background())
+	defer pollCancel()
+	go srv.CollectTrafficLoop(pollCtx, pollEvery)
 	go func() {
 		log.Printf("plane listen %s", addr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

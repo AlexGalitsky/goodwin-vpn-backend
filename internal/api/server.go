@@ -74,6 +74,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/users/{id}/revoke", s.withAuth(s.revokeUser))
 	s.mux.HandleFunc("POST /v1/users/{id}/rotate", s.withAuth(s.rotateUser))
 	s.mux.HandleFunc("GET /v1/audit", s.withAuth(s.listAudit))
+	s.mux.HandleFunc("POST /v1/traffic/collect", s.withAuth(s.collectTrafficNow))
 	s.mux.HandleFunc("GET /v1/nodes", s.withAuth(s.listNodes))
 	s.mux.HandleFunc("POST /v1/nodes", s.withAuth(s.createNode))
 	s.mux.HandleFunc("DELETE /v1/nodes/{id}", s.withAuth(s.deleteNode))

@@ -7,6 +7,7 @@ import (
 )
 
 const GRPCService = "goodwin"
+const StatsPort = 10085
 
 func Build(v desired.VLESS) ([]byte, error) {
 	clients := make([]map[string]any, 0, len(v.Clients))
@@ -67,6 +68,13 @@ func Build(v desired.VLESS) ([]byte, error) {
 					"routeOnly":    true,
 				},
 			},
+			map[string]any{
+				"tag":      "api",
+				"listen":   "127.0.0.1",
+				"port":     StatsPort,
+				"protocol": "dokodemo-door",
+				"settings": map[string]any{"address": "127.0.0.1"},
+			},
 		},
 		"outbounds": []any{
 			map[string]any{
@@ -76,9 +84,27 @@ func Build(v desired.VLESS) ([]byte, error) {
 			},
 			map[string]any{"protocol": "blackhole", "tag": "block"},
 		},
+		"stats": map[string]any{},
+		"api": map[string]any{
+			"tag":      "api",
+			"services": []string{"StatsService"},
+		},
+		"policy": map[string]any{
+			"levels": map[string]any{
+				"0": map[string]any{
+					"statsUserUplink":   true,
+					"statsUserDownlink": true,
+				},
+			},
+		},
 		"routing": map[string]any{
 			"domainStrategy": "AsIs",
 			"rules": []any{
+				map[string]any{
+					"type":        "field",
+					"inboundTag":  []string{"api"},
+					"outboundTag": "api",
+				},
 				map[string]any{
 					"type":        "field",
 					"protocol":    []string{"bittorrent"},

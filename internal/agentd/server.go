@@ -47,6 +47,7 @@ func New(cfg Config) *Server {
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /v1/health", s.auth(s.health))
+	s.mux.HandleFunc("GET /v1/stats", s.auth(s.stats))
 	s.mux.HandleFunc("POST /v1/exec", s.auth(s.exec))
 	s.mux.HandleFunc("PUT /v1/desired", s.auth(s.desired))
 	return s
@@ -115,6 +116,19 @@ func binVersion(path string, fn func(string) string) string {
 		return ""
 	}
 	return fn(path)
+}
+
+func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
+	bin := filepath.Join(s.cfg.Prefix, "xray", "xray")
+	users, err := xrayrun.QueryUserStats(r.Context(), bin, xrayrun.StatsAddr)
+	if users == nil {
+		users = []xrayrun.UserBytes{}
+	}
+	out := map[string]any{"ok": err == nil, "users": users}
+	if err != nil {
+		out["detail"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {

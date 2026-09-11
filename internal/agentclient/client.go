@@ -12,6 +12,7 @@ import (
 
 	"website.goodwin.vpn/plane/internal/desired"
 	"website.goodwin.vpn/plane/internal/execcmd"
+	"website.goodwin.vpn/plane/internal/xrayrun"
 )
 
 type Client struct {
@@ -60,6 +61,23 @@ func (c *Client) Health(ctx context.Context) (Health, error) {
 		return Health{}, err
 	}
 	return h, nil
+}
+
+type Stats struct {
+	OK     bool                `json:"ok"`
+	Users  []xrayrun.UserBytes `json:"users"`
+	Detail string              `json:"detail,omitempty"`
+}
+
+func (c *Client) Stats(ctx context.Context) (Stats, error) {
+	var st Stats
+	if err := c.do(ctx, http.MethodGet, "/v1/stats", nil, 12*time.Second, &st); err != nil {
+		return Stats{}, err
+	}
+	if st.Users == nil {
+		st.Users = []xrayrun.UserBytes{}
+	}
+	return st, nil
 }
 
 type execReq struct {

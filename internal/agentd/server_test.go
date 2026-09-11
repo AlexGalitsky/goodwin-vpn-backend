@@ -45,6 +45,28 @@ func TestHealthAndExec(t *testing.T) {
 		t.Fatalf("health %+v", health)
 	}
 
+	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/v1/stats", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawStats, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatalf("stats status %d", res.StatusCode)
+	}
+	var stats struct {
+		OK    bool             `json:"ok"`
+		Users []map[string]any `json:"users"`
+	}
+	if err := json.Unmarshal(rawStats, &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.Users == nil {
+		t.Fatalf("stats users nil %s", rawStats)
+	}
+
 	body, _ := json.Marshal(map[string]any{"shell": "echo plane-exec", "timeout_sec": 5})
 	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/v1/exec", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer secret")

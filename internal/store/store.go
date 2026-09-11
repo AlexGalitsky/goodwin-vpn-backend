@@ -607,3 +607,50 @@ func (s *Store) TTLink(ctx context.Context, nodeID, userID uuid.UUID) (string, e
 	}
 	return link, err
 }
+
+func (s *Store) ApplyXrayTraffic(ctx context.Context, nodeID, userID uuid.UUID, uplink, downlink int64) (addedUp, addedDown int64, u User, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, User{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	u, err = scanUser(tx.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE id=$1 FOR UPDATE`, userID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, 0, User{}, ErrNotFound
+		}
+		return 0, 0, User{}, err
+	}
+
+	var prevUp, prevDown int64
+	qerr := tx.QueryRow(ctx, `SELECT uplink, downlink FROM traffic_cursor WHERE node_id=$1 AND user_id=$2 FOR UPDATE`, nodeID, userID).Scan(&prevUp, &prevDown)
+	if qerr != nil && !errors.Is(qerr, pgx.ErrNoRows) {
+		return 0, 0, User{}, qerr
+	}
+	addedUp = uplink - prevUp
+	if addedUp < 0 {
+		addedUp = uplink
+	}
+	addedDown = downlink - prevDown
+	if addedDown < 0 {
+		addedDown = downlink
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO traffic_cursor (node_id, user_id, uplink, downlink) VALUES ($1,$2,$3,$4)
+		ON CONFLICT (node_id, user_id) DO UPDATE SET uplink=EXCLUDED.uplink, downlink=EXCLUDED.downlink`,
+		nodeID, userID, uplink, downlink); err != nil {
+		return 0, 0, User{}, err
+	}
+	if addedUp != 0 || addedDown != 0 {
+		if _, err := tx.Exec(ctx, `UPDATE users SET upload=upload+$2, download=download+$3 WHERE id=$1`, userID, addedUp, addedDown); err != nil {
+			return 0, 0, User{}, err
+		}
+		u.Upload += addedUp
+		u.Download += addedDown
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, User{}, err
+	}
+	return addedUp, addedDown, u, nil
+}
