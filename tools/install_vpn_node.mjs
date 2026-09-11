@@ -62,6 +62,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+Environment=HOME=/root
 ExecStart=${destBin} -config ${cfgPath}
 Restart=on-failure
 RestartSec=2

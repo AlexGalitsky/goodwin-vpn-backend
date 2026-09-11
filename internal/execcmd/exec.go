@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -37,6 +39,7 @@ func Run(ctx context.Context, shell string, timeout time.Duration, allowed bool)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", shell)
+	cmd.Env = withBuildEnv(os.Environ())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -62,6 +65,46 @@ func Run(ctx context.Context, shell string, timeout time.Duration, allowed bool)
 		return res, err
 	}
 	return res, nil
+}
+
+// systemd services often have no HOME; go then refuses to build.
+func withBuildEnv(env []string) []string {
+	have := map[string]string{}
+	out := make([]string, 0, len(env)+8)
+	for _, e := range env {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		have[k] = v
+		if v != "" {
+			out = append(out, e)
+		}
+	}
+	home := have["HOME"]
+	if home == "" {
+		if os.Getuid() == 0 {
+			home = "/root"
+		} else {
+			home = os.TempDir()
+		}
+		out = append(out, "HOME="+home)
+	}
+	cache := have["XDG_CACHE_HOME"]
+	if cache == "" {
+		cache = filepath.Join(home, ".cache")
+		out = append(out, "XDG_CACHE_HOME="+cache)
+	}
+	if have["GOCACHE"] == "" {
+		out = append(out, "GOCACHE="+filepath.Join(cache, "go-build"))
+	}
+	if have["GOPATH"] == "" {
+		out = append(out, "GOPATH="+filepath.Join(home, "go"))
+	}
+	if have["PATH"] == "" {
+		out = append(out, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	}
+	return out
 }
 
 func clip(s string) string {

@@ -23,3 +23,17 @@ func TestRunDisabled(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestRunFillsHomeWhenUnset(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("GOCACHE", "")
+	t.Setenv("GOPATH", "")
+	res, err := Run(context.Background(), `printf '%s' "$HOME"`, 2*time.Second, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 0 || strings.TrimSpace(res.Stdout) == "" {
+		t.Fatalf("expected HOME, got %+v", res)
+	}
+}
