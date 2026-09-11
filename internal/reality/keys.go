@@ -5,6 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"strconv"
+	"strings"
 
 	"golang.org/x/crypto/curve25519"
 )
@@ -59,4 +62,52 @@ func (k Keys) Validate() error {
 
 func (k Keys) MatchesDefaults() bool {
 	return k.Dest == DefaultDest && k.SNI == DefaultSNI
+}
+
+func FillMissing(k Keys) Keys {
+	if strings.TrimSpace(k.Dest) == "" {
+		k.Dest = DefaultDest
+	}
+	if strings.TrimSpace(k.SNI) == "" {
+		k.SNI = DefaultSNI
+	}
+	return k
+}
+
+func NormalizeDest(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimSuffix(s, "/")
+	if s == "" {
+		return "", fmt.Errorf("dest required")
+	}
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		host, port = s, "443"
+	}
+	host = strings.TrimSpace(host)
+	if host == "" || strings.ContainsAny(host, "/ ") {
+		return "", fmt.Errorf("dest host")
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p <= 0 || p > 65535 {
+		return "", fmt.Errorf("dest port")
+	}
+	return net.JoinHostPort(host, strconv.Itoa(p)), nil
+}
+
+func NormalizeSNI(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimSuffix(s, "/")
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		s = host
+	}
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" || strings.ContainsAny(s, "/ :") {
+		return "", fmt.Errorf("sni required")
+	}
+	return s, nil
 }

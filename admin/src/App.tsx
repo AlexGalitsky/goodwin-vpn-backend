@@ -180,6 +180,7 @@ export default function App() {
       {tab === "groups" && <Groups onError={setErr} />}
       {tab === "tools" && (
         <div className="grid">
+          <RealitySettings onError={setErr} />
           <Exec onError={setErr} />
           <AuditLog onError={setErr} />
         </div>
@@ -261,7 +262,9 @@ function OverviewPage({ onError }: { onError: (s: string) => void }) {
         <h2>Подписка и REALITY</h2>
         <p className="muted">{ov.public_sub_base || "—"}</p>
         <p className="muted">
-          dest {ov.reality_dest || "ещё не Apply"} · SNI {ov.reality_sni || "—"}
+          dest {ov.reality_dest || "www.cloudflare.com:443"} · SNI {ov.reality_sni || "www.cloudflare.com"}
+          {" · "}
+          меняется во вкладке Инструменты, потом Apply на нодах
         </p>
         {ov.last_apply ? (
           <p className="muted">
@@ -1089,6 +1092,62 @@ function GroupRow({
         </button>
       </div>
     </div>
+  );
+}
+
+function RealitySettings({ onError }: { onError: (s: string) => void }) {
+  const [dest, setDest] = useState("www.cloudflare.com:443");
+  const [sni, setSni] = useState("www.cloudflare.com");
+  const [keysReady, setKeysReady] = useState(false);
+  const [saved, setSaved] = useState("");
+
+  useEffect(() => {
+    api<{ reality_dest: string; reality_sni: string; keys_ready: boolean }>("/v1/settings")
+      .then((s) => {
+        if (s.reality_dest) setDest(s.reality_dest);
+        if (s.reality_sni) setSni(s.reality_sni);
+        setKeysReady(s.keys_ready);
+      })
+      .catch((e) => onError(catchErr(e, "настройки")));
+  }, [onError]);
+
+  return (
+    <form
+      className="card grid"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setSaved("");
+        try {
+          const res = await api<{ reality_dest: string; reality_sni: string }>("/v1/settings", {
+            method: "PATCH",
+            body: JSON.stringify({ reality_dest: dest, reality_sni: sni }),
+          });
+          setDest(res.reality_dest);
+          setSni(res.reality_sni);
+          setSaved("Сохранено. Нажмите Apply на titan и mimas — ключи REALITY не меняются.");
+        } catch (err) {
+          onError(catchErr(err, "сохранить dest/SNI"));
+        }
+      }}
+    >
+      <h2>REALITY dest / SNI</h2>
+      <p className="muted">
+        Куда Xray стучится при handshake. Не hostname ноды. Не сканер — вписываете сами. Ключи{" "}
+        {keysReady ? "уже есть" : "появятся при первом Apply"}.
+      </p>
+      <label>
+        dest (host:port)
+        <input value={dest} onChange={(e) => setDest(e.target.value)} autoComplete="off" />
+      </label>
+      <label>
+        SNI
+        <input value={sni} onChange={(e) => setSni(e.target.value)} autoComplete="off" />
+      </label>
+      <button className="primary" type="submit">
+        Сохранить
+      </button>
+      {saved ? <p className="ok">{saved}</p> : null}
+    </form>
   );
 }
 

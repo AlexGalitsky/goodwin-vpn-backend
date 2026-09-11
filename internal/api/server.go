@@ -61,6 +61,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/auth/logout", s.logout)
 	s.mux.HandleFunc("GET /v1/me", s.withAuth(s.me))
 	s.mux.HandleFunc("GET /v1/overview", s.withAuth(s.overview))
+	s.mux.HandleFunc("GET /v1/settings", s.withAuth(s.getSettings))
+	s.mux.HandleFunc("PATCH /v1/settings", s.withAuth(s.patchSettings))
 	s.mux.HandleFunc("GET /v1/groups", s.withAuth(s.listGroups))
 	s.mux.HandleFunc("POST /v1/groups", s.withAuth(s.createGroup))
 	s.mux.HandleFunc("PATCH /v1/groups/{id}", s.withAuth(s.patchGroup))
@@ -251,6 +253,12 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	dest, _ := s.store.Setting(ctx, "reality_dest")
 	sni, _ := s.store.Setting(ctx, "reality_sni")
+	if dest == "" {
+		dest = reality.DefaultDest
+	}
+	if sni == "" {
+		sni = reality.DefaultSNI
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"public_sub_base": s.cfg.PublicSubBase,
 		"https_ok":        strings.HasPrefix(strings.ToLower(s.cfg.PublicSubBase), "https://"),
@@ -260,6 +268,87 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		"last_apply":      last,
 		"reality_dest":    dest,
 		"reality_sni":     sni,
+	})
+}
+
+func (s *Server) settingValue(ctx context.Context, key string) string {
+	v, err := s.store.Setting(ctx, key)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	dest := s.settingValue(ctx, "reality_dest")
+	sni := s.settingValue(ctx, "reality_sni")
+	if dest == "" {
+		dest = reality.DefaultDest
+	}
+	if sni == "" {
+		sni = reality.DefaultSNI
+	}
+	pub := s.settingValue(ctx, "reality_public")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"reality_dest":   dest,
+		"reality_sni":    sni,
+		"reality_public": pub,
+		"keys_ready":     pub != "",
+	})
+}
+
+func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RealityDest *string `json:"reality_dest"`
+		RealitySNI  *string `json:"reality_sni"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.RealityDest == nil && req.RealitySNI == nil {
+		writeErr(w, http.StatusBadRequest, "no fields")
+		return
+	}
+	ctx := r.Context()
+	dest := s.settingValue(ctx, "reality_dest")
+	sni := s.settingValue(ctx, "reality_sni")
+	if dest == "" {
+		dest = reality.DefaultDest
+	}
+	if sni == "" {
+		sni = reality.DefaultSNI
+	}
+	if req.RealityDest != nil {
+		got, err := reality.NormalizeDest(*req.RealityDest)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		dest = got
+	}
+	if req.RealitySNI != nil {
+		got, err := reality.NormalizeSNI(*req.RealitySNI)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		sni = got
+	}
+	if err := s.store.SetSetting(ctx, "reality_dest", dest); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.store.SetSetting(ctx, "reality_sni", sni); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.store.Audit(ctx, "admin", "settings", nil, dest+" "+sni)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"reality_dest": dest,
+		"reality_sni":  sni,
 	})
 }
 
@@ -1275,27 +1364,32 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 }
 
 func (s *Server) ensureReality(ctx context.Context) (reality.Keys, error) {
-	pub, err := s.store.Setting(ctx, "reality_public")
-	if err == nil && pub != "" {
-		priv, _ := s.store.Setting(ctx, "reality_private")
-		sid, _ := s.store.Setting(ctx, "reality_short_id")
-		dest, _ := s.store.Setting(ctx, "reality_dest")
-		sni, _ := s.store.Setting(ctx, "reality_sni")
-		k := reality.Keys{PrivateKey: priv, PublicKey: pub, ShortID: sid, Dest: dest, SNI: sni}
-		if k.Dest == "" {
-			k.Dest = reality.DefaultDest
-		}
-		if k.SNI == "" {
-			k.SNI = reality.DefaultSNI
-		}
-		if k.MatchesDefaults() {
-			return k, k.Validate()
-		}
+	pub := s.settingValue(ctx, "reality_public")
+	priv := s.settingValue(ctx, "reality_private")
+	sid := s.settingValue(ctx, "reality_short_id")
+	dest := s.settingValue(ctx, "reality_dest")
+	sni := s.settingValue(ctx, "reality_sni")
+	if pub != "" && priv != "" && sid != "" {
+		k := reality.FillMissing(reality.Keys{
+			PrivateKey: priv,
+			PublicKey:  pub,
+			ShortID:    sid,
+			Dest:       dest,
+			SNI:        sni,
+		})
+		return k, k.Validate()
 	}
 	k, err := reality.Generate()
 	if err != nil {
 		return reality.Keys{}, err
 	}
+	if dest != "" {
+		k.Dest = dest
+	}
+	if sni != "" {
+		k.SNI = sni
+	}
+	k = reality.FillMissing(k)
 	pairs := map[string]string{
 		"reality_private":  k.PrivateKey,
 		"reality_public":   k.PublicKey,
