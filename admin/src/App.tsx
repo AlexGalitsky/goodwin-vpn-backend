@@ -266,6 +266,7 @@ function OverviewPage({ onError }: { onError: (s: string) => void }) {
           {" · "}
           меняется во вкладке Инструменты, потом Apply на нодах
         </p>
+        <p className="muted">Xray режет BitTorrent и SMTP (25/465/587). Hy2 — только SMTP. TT без ACL.</p>
         {ov.last_apply ? (
           <p className="muted">
             Последний Apply: {new Date(ov.last_apply.At).toLocaleString()} — {ov.last_apply.Detail}

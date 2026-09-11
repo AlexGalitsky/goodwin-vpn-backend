@@ -29,6 +29,9 @@ func TestBuild(t *testing.T) {
 	if strings.Contains(s, "obfs") {
 		t.Fatal("must not set obfs")
 	}
+	if !strings.Contains(s, "reject(all, tcp/25)") || !strings.Contains(s, "tcp/587") {
+		t.Fatalf("smtp acl %s", s)
+	}
 }
 
 func TestCertPaths(t *testing.T) {

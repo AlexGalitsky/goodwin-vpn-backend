@@ -54,6 +54,11 @@ masquerade:
   proxy:
     url: https://www.cloudflare.com/
     rewriteHost: true
+acl:
+  inline:
+    - reject(all, tcp/25)
+    - reject(all, tcp/465)
+    - reject(all, tcp/587)
 `, h.Port, strconv.Quote(cert), strconv.Quote(key), strconv.Quote(authCmd))
 	return []byte(cfg), nil
 }

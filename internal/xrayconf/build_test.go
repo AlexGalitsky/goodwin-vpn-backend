@@ -53,4 +53,28 @@ func TestBuild(t *testing.T) {
 	if direct["settings"].(map[string]any)["domainStrategy"] != "UseIPv4" {
 		t.Fatalf("outbound %+v", direct)
 	}
+	routing, ok := m["routing"].(map[string]any)
+	if !ok {
+		t.Fatal("missing routing")
+	}
+	rules, _ := routing["rules"].([]any)
+	if len(rules) != 2 {
+		t.Fatalf("rules %d", len(rules))
+	}
+	r0 := rules[0].(map[string]any)
+	if r0["outboundTag"] != "block" {
+		t.Fatalf("bt rule %+v", r0)
+	}
+	protos, _ := r0["protocol"].([]any)
+	if len(protos) != 1 || protos[0] != "bittorrent" {
+		t.Fatalf("bt protocol %+v", r0)
+	}
+	r1 := rules[1].(map[string]any)
+	if r1["outboundTag"] != "block" || r1["port"] != "25,465,587" {
+		t.Fatalf("smtp rule %+v", r1)
+	}
+	block := outs[1].(map[string]any)
+	if block["tag"] != "block" || block["protocol"] != "blackhole" {
+		t.Fatalf("block outbound %+v", block)
+	}
 }

@@ -63,7 +63,7 @@ func Build(v desired.VLESS) ([]byte, error) {
 				"streamSettings": stream,
 				"sniffing": map[string]any{
 					"enabled":      true,
-					"destOverride": []string{"http", "tls"},
+					"destOverride": []string{"http", "tls", "quic"},
 					"routeOnly":    true,
 				},
 			},
@@ -75,6 +75,21 @@ func Build(v desired.VLESS) ([]byte, error) {
 				"settings": map[string]any{"domainStrategy": "UseIPv4"},
 			},
 			map[string]any{"protocol": "blackhole", "tag": "block"},
+		},
+		"routing": map[string]any{
+			"domainStrategy": "AsIs",
+			"rules": []any{
+				map[string]any{
+					"type":        "field",
+					"protocol":    []string{"bittorrent"},
+					"outboundTag": "block",
+				},
+				map[string]any{
+					"type":        "field",
+					"port":        "25,465,587",
+					"outboundTag": "block",
+				},
+			},
 		},
 	}
 	return json.MarshalIndent(cfg, "", "  ")
