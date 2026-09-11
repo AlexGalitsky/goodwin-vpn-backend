@@ -28,7 +28,7 @@
 | API `cmd/plane` | Go, Postgres 16, `pgx`, goose-миграции |
 | Agent `cmd/agent` | тот же Go-модуль, static binary, systemd |
 | Admin `admin/` | Vite + React + TypeScript |
-| Инсталлятор | `node tools/install_vpn_node.mjs` |
+| Инсталлятор | `tools/bootstrap_vpn_node.sh` (ставит Node) → `node tools/install_vpn_node.mjs` |
 | Ядра на ноде | официальные релизы: Xray-core, hysteria, `trusttunnel_endpoint` |
 | TLS панели | Caddy: отдельно админка и публичный `/sub` |
 
