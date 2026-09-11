@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"website.goodwin.vpn/plane/internal/desired"
 	"website.goodwin.vpn/plane/internal/execcmd"
 )
 
@@ -23,15 +24,16 @@ func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
-		HTTP:    &http.Client{Timeout: 125 * time.Second},
+		HTTP:    &http.Client{Timeout: 180 * time.Second},
 	}
 }
 
 type Health struct {
-	OK        bool   `json:"ok"`
-	Hostname  string `json:"hostname"`
-	AllowExec bool   `json:"allow_exec"`
-	Version   string `json:"version"`
+	OK         bool   `json:"ok"`
+	Hostname   string `json:"hostname"`
+	AllowExec  bool   `json:"allow_exec"`
+	Version    string `json:"version"`
+	XrayListen bool   `json:"xray_listen"`
 }
 
 func (c *Client) Health(ctx context.Context) (Health, error) {
@@ -45,6 +47,12 @@ func (c *Client) Health(ctx context.Context) (Health, error) {
 type execReq struct {
 	Shell      string `json:"shell"`
 	TimeoutSec int    `json:"timeout_sec"`
+}
+
+func (c *Client) Apply(ctx context.Context, st desired.State) (desired.ApplyResult, error) {
+	var res desired.ApplyResult
+	err := c.do(ctx, http.MethodPut, "/v1/desired", st, 180*time.Second, &res)
+	return res, err
 }
 
 func (c *Client) Exec(ctx context.Context, shell string, timeout time.Duration) (execcmd.Result, error) {

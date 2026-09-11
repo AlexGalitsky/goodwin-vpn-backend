@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -51,6 +52,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
@@ -109,10 +111,11 @@ type Node struct {
 	IPv6        string
 	Hostname    string
 	ControlPort int
-	Families    []string
-	PortsJSON   json.RawMessage `json:"ports"`
-	Status      string
-	AgentToken  string `json:"-"`
+	Families        []string
+	AppliedFamilies []string `json:"applied_families"`
+	PortsJSON       json.RawMessage `json:"ports"`
+	Status          string
+	AgentToken      string `json:"-"`
 }
 
 func (s *Store) CreateGroup(ctx context.Context, name string, protocols []string) (Group, error) {
@@ -206,9 +209,9 @@ func (s *Store) CreateNode(ctx context.Context, n Node) (Node, error) {
 		n.PortsJSON = json.RawMessage(`{}`)
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO nodes (id, name, ipv4, ipv6, hostname, control_port, families, ports, status, agent_token)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		n.ID, n.Name, n.IPv4, n.IPv6, n.Hostname, n.ControlPort, n.Families, n.PortsJSON, n.Status, n.AgentToken,
+		INSERT INTO nodes (id, name, ipv4, ipv6, hostname, control_port, families, applied_families, ports, status, agent_token)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		n.ID, n.Name, n.IPv4, n.IPv6, n.Hostname, n.ControlPort, n.Families, n.AppliedFamilies, n.PortsJSON, n.Status, n.AgentToken,
 	)
 	return n, err
 }
@@ -216,9 +219,9 @@ func (s *Store) CreateNode(ctx context.Context, n Node) (Node, error) {
 func (s *Store) UpdateNode(ctx context.Context, n Node) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE nodes SET name=$2, ipv4=$3, ipv6=$4, hostname=$5, control_port=$6,
-			families=$7, ports=$8, status=$9, agent_token=$10
+			families=$7, applied_families=$8, ports=$9, status=$10, agent_token=$11
 		WHERE id=$1`,
-		n.ID, n.Name, n.IPv4, n.IPv6, n.Hostname, n.ControlPort, n.Families, n.PortsJSON, n.Status, n.AgentToken,
+		n.ID, n.Name, n.IPv4, n.IPv6, n.Hostname, n.ControlPort, n.Families, n.AppliedFamilies, n.PortsJSON, n.Status, n.AgentToken,
 	)
 	return err
 }
@@ -226,9 +229,9 @@ func (s *Store) UpdateNode(ctx context.Context, n Node) error {
 func (s *Store) Node(ctx context.Context, id uuid.UUID) (Node, error) {
 	var n Node
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, name, ipv4, ipv6, hostname, control_port, families, ports, status, agent_token
+		SELECT id, name, ipv4, ipv6, hostname, control_port, families, applied_families, ports, status, agent_token
 		FROM nodes WHERE id=$1`, id).Scan(
-		&n.ID, &n.Name, &n.IPv4, &n.IPv6, &n.Hostname, &n.ControlPort, &n.Families, &n.PortsJSON, &n.Status, &n.AgentToken,
+		&n.ID, &n.Name, &n.IPv4, &n.IPv6, &n.Hostname, &n.ControlPort, &n.Families, &n.AppliedFamilies, &n.PortsJSON, &n.Status, &n.AgentToken,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Node{}, ErrNotFound
@@ -238,7 +241,7 @@ func (s *Store) Node(ctx context.Context, id uuid.UUID) (Node, error) {
 
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, name, ipv4, ipv6, hostname, control_port, families, ports, status, agent_token
+		SELECT id, name, ipv4, ipv6, hostname, control_port, families, applied_families, ports, status, agent_token
 		FROM nodes ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -247,7 +250,7 @@ func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	var out []Node
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.Name, &n.IPv4, &n.IPv6, &n.Hostname, &n.ControlPort, &n.Families, &n.PortsJSON, &n.Status, &n.AgentToken); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.IPv4, &n.IPv6, &n.Hostname, &n.ControlPort, &n.Families, &n.AppliedFamilies, &n.PortsJSON, &n.Status, &n.AgentToken); err != nil {
 			return nil, err
 		}
 		out = append(out, n)
@@ -312,6 +315,52 @@ func (s *Store) Audit(ctx context.Context, actor, action string, nodeID *uuid.UU
 		uuid.New(), actor, action, nodeID, detail,
 	)
 	return err
+}
+
+func (s *Store) Setting(ctx context.Context, key string) (string, error) {
+	var v string
+	err := s.pool.QueryRow(ctx, `SELECT value FROM plane_settings WHERE key=$1`, key).Scan(&v)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return v, err
+}
+
+func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO plane_settings (key, value) VALUES ($1,$2)
+		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, key, value)
+	return err
+}
+
+func (s *Store) UsersInGroup(ctx context.Context, groupID uuid.UUID) ([]User, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, group_id, display_name, vless_uuid, hy2_password, tt_user, tt_password,
+			upload, download, total, status, sub_token
+		FROM users WHERE group_id=$1 AND status='active'`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.GroupID, &u.DisplayName, &u.VlessUUID, &u.Hy2Password, &u.TTUser, &u.TTPassword,
+			&u.Upload, &u.Download, &u.Total, &u.Status, &u.SubToken); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) Group(ctx context.Context, id uuid.UUID) (Group, error) {
+	var g Group
+	err := s.pool.QueryRow(ctx, `SELECT id, name, protocols FROM groups WHERE id=$1`, id).Scan(&g.ID, &g.Name, &g.Protocols)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Group{}, ErrNotFound
+	}
+	return g, err
 }
 
 func (s *Store) SeedDev(ctx context.Context) error {

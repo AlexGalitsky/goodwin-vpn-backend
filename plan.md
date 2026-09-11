@@ -162,6 +162,8 @@ Login; Nodes; enroll; stack+Apply log; **exec на ноде (dev)**; Groups; Use
 
 Не начинать Hy2/TT, пока P2–P3 не коннектятся с телефона по подписке.
 
+**P2 в коде:** `POST /v1/nodes/:id/apply` ставит Xray VLESS+REALITY на 443. Админка — кнопка Apply. Ключи plane-wide (`www.microsoft.com` dest). Ссылки в preview только после `ready`.
+
 ---
 
 ## Совместимость с `app/`

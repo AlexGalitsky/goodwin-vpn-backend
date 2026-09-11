@@ -228,6 +228,7 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
               <th>IP</th>
               <th>Status</th>
               <th>Families</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -237,6 +238,23 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
                 <td>{n.IPv4 || "—"}</td>
                 <td>{n.Status}</td>
                 <td>{(n.Families || []).join(", ")}</td>
+                <td>
+                  <button
+                    type="button"
+                    disabled={n.Status === "pending"}
+                    onClick={async () => {
+                      onError("");
+                      try {
+                        await api(`/v1/nodes/${n.ID}/apply`, { method: "POST", body: "{}" });
+                        await load();
+                      } catch (e) {
+                        onError(e instanceof Error ? e.message : "apply");
+                      }
+                    }}
+                  >
+                    Apply
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>

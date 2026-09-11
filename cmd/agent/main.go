@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,12 +51,20 @@ func main() {
 		Token:     cfg.Token,
 		AllowExec: cfg.AllowExec,
 		Version:   "dev",
+		Prefix:    prefixFrom(cfgPath),
 	})
 	log.Printf("agent listen %s allow_exec=%v", cfg.Listen, cfg.AllowExec)
 	httpSrv := &http.Server{Addr: listenAddr(cfg.Listen), Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func prefixFrom(cfgPath *string) string {
+	if cfgPath != nil && *cfgPath != "" {
+		return filepath.Dir(*cfgPath)
+	}
+	return "/opt/goodwin-vpn-agent"
 }
 
 func listenAddr(v string) string {

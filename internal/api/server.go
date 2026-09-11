@@ -20,6 +20,8 @@ import (
 	"github.com/google/uuid"
 
 	"website.goodwin.vpn/plane/internal/agentclient"
+	"website.goodwin.vpn/plane/internal/desired"
+	"website.goodwin.vpn/plane/internal/reality"
 	"website.goodwin.vpn/plane/internal/stack"
 	"website.goodwin.vpn/plane/internal/store"
 	"website.goodwin.vpn/plane/internal/sub"
@@ -62,6 +64,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /v1/nodes/{id}/stack", s.withAuth(s.setNodeStack))
 	s.mux.HandleFunc("GET /v1/nodes/{id}/health", s.withAuth(s.nodeHealth))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/exec", s.withAuth(s.nodeExec))
+	s.mux.HandleFunc("POST /v1/nodes/{id}/apply", s.withAuth(s.applyNode))
 	s.mux.HandleFunc("GET /v1/users/{id}/preview", s.withAuth(s.previewUser))
 	s.mux.HandleFunc("GET /sub/{token}", s.subscription)
 }
@@ -515,6 +518,150 @@ func (s *Server) nodeExec(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
+	c, n, err := s.agentFor(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	keys, err := s.ensureReality(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var ports stack.Ports
+	_ = json.Unmarshal(n.PortsJSON, &ports)
+	port := ports.VlessTCP
+	if port <= 0 {
+		port = 443
+	}
+	clients := []desired.VLESSClient{}
+	gids, err := s.store.GroupIDsForNode(r.Context(), n.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(gids) == 0 {
+		gs, err := s.store.ListGroups(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, g := range gs {
+			gids = append(gids, g.ID)
+		}
+		if err := s.store.SetNodeGroups(r.Context(), n.ID, gids); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	seen := map[string]bool{}
+	for _, gid := range gids {
+		g, err := s.store.Group(r.Context(), gid)
+		if err != nil {
+			continue
+		}
+		if !stack.HasFamily(g.Protocols, stack.FamilyVLESS) {
+			continue
+		}
+		users, err := s.store.UsersInGroup(r.Context(), gid)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, u := range users {
+			if seen[u.VlessUUID] {
+				continue
+			}
+			seen[u.VlessUUID] = true
+			clients = append(clients, desired.VLESSClient{
+				ID:    u.VlessUUID,
+				Email: u.ID.String(),
+				Flow:  "xtls-rprx-vision",
+			})
+		}
+	}
+	st := desired.State{VLESS: &desired.VLESS{
+		Port:    port,
+		Reality: keys,
+		Clients: clients,
+	}}
+	res, err := c.Apply(r.Context(), st)
+	if err != nil {
+		n.Status = "failed"
+		_ = s.store.UpdateNode(r.Context(), n)
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if res.XrayListen {
+		n.Status = "ready"
+		n.AppliedFamilies = []string{stack.FamilyVLESS}
+	} else {
+		n.Status = "degraded"
+		n.AppliedFamilies = []string{stack.FamilyVLESS}
+	}
+	if err := s.store.UpdateNode(r.Context(), n); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.store.Audit(r.Context(), "admin", "apply", &n.ID, res.Detail)
+	writeJSON(w, http.StatusOK, map[string]any{"node_status": n.Status, "apply": res, "clients": len(clients)})
+}
+
+func (s *Server) ensureReality(ctx context.Context) (reality.Keys, error) {
+	pub, err := s.store.Setting(ctx, "reality_public")
+	if err == nil && pub != "" {
+		priv, _ := s.store.Setting(ctx, "reality_private")
+		sid, _ := s.store.Setting(ctx, "reality_short_id")
+		dest, _ := s.store.Setting(ctx, "reality_dest")
+		sni, _ := s.store.Setting(ctx, "reality_sni")
+		k := reality.Keys{PrivateKey: priv, PublicKey: pub, ShortID: sid, Dest: dest, SNI: sni}
+		if k.Dest == "" {
+			k.Dest = reality.DefaultDest
+		}
+		if k.SNI == "" {
+			k.SNI = reality.DefaultSNI
+		}
+		return k, k.Validate()
+	}
+	k, err := reality.Generate()
+	if err != nil {
+		return reality.Keys{}, err
+	}
+	pairs := map[string]string{
+		"reality_private":  k.PrivateKey,
+		"reality_public":   k.PublicKey,
+		"reality_short_id": k.ShortID,
+		"reality_dest":     k.Dest,
+		"reality_sni":      k.SNI,
+	}
+	for key, val := range pairs {
+		if err := s.store.SetSetting(ctx, key, val); err != nil {
+			return reality.Keys{}, err
+		}
+	}
+	return k, nil
+}
+
+func (s *Server) realityShare(ctx context.Context) (*sub.Reality, error) {
+	pub, err := s.store.Setting(ctx, "reality_public")
+	if err != nil || pub == "" {
+		return nil, err
+	}
+	sid, _ := s.store.Setting(ctx, "reality_short_id")
+	sni, _ := s.store.Setting(ctx, "reality_sni")
+	if sni == "" {
+		sni = reality.DefaultSNI
+	}
+	return &sub.Reality{
+		SNI:       sni,
+		PublicKey: pub,
+		ShortID:   sid,
+		Flow:      "xtls-rprx-vision",
+		FP:        "chrome",
+	}, nil
+}
+
 func (s *Server) agentFor(r *http.Request) (*agentclient.Client, store.Node, error) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
@@ -614,7 +761,7 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 		if err != nil {
 			continue
 		}
-		if n.Status != "enrolled" && n.Status != "ready" {
+		if n.Status != "ready" {
 			continue
 		}
 		host := n.Hostname
@@ -623,7 +770,12 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 		}
 		var ports stack.Ports
 		_ = json.Unmarshal(n.PortsJSON, &ports)
-		for _, fam := range n.Families {
+		rk, _ := s.realityShare(ctx)
+		fams := n.AppliedFamilies
+		if len(fams) == 0 {
+			continue
+		}
+		for _, fam := range fams {
 			if !stack.HasFamily(g.Protocols, fam) {
 				continue
 			}
@@ -636,13 +788,17 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 			case stack.FamilyTT:
 				port = ports.TT
 			}
-			lines = append(lines, sub.NodeLine{
+			line := sub.NodeLine{
 				Name:   n.Name,
 				Host:   host,
 				Family: fam,
 				Port:   port,
 				Hy2SNI: n.Hostname,
-			})
+			}
+			if fam == stack.FamilyVLESS && rk != nil {
+				line.Reality = rk
+			}
+			lines = append(lines, line)
 		}
 	}
 	res, err := sub.Render(sub.User{
