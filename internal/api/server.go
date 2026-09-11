@@ -75,7 +75,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/users/{id}/preview", s.withAuth(s.previewUser))
 	s.mux.HandleFunc("GET /sub/{token}", s.subscription)
 	if strings.TrimSpace(s.cfg.AdminDir) != "" {
-		s.mux.HandleFunc("GET /", s.adminStatic)
 		s.mux.HandleFunc("GET /{path...}", s.adminStatic)
 	}
 }
@@ -152,7 +151,7 @@ func (s *Server) adminStatic(w http.ResponseWriter, r *http.Request) {
 	if rel == "" || rel == "." {
 		target = filepath.Join(root, "index.html")
 	}
-	if !strings.HasPrefix(target, root) {
+	if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
 		http.NotFound(w, r)
 		return
 	}
