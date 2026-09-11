@@ -12,6 +12,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -181,8 +182,11 @@ sh("go", ["build", "-o", tmpBin, "./cmd/plane"], {
   },
   stdio: "inherit",
 });
-copyFileSync(tmpBin, planeBin);
-chmodSync(planeBin, 0o755);
+spawnSync("systemctl", ["stop", "goodwin-vpn-plane"], { encoding: "utf8" });
+const staged = planeBin + ".new";
+copyFileSync(tmpBin, staged);
+chmodSync(staged, 0o755);
+renameSync(staged, planeBin);
 
 sh("npm", ["ci"], { cwd: path.join(src, "admin"), stdio: "inherit" });
 sh("npm", ["run", "build"], { cwd: path.join(src, "admin"), stdio: "inherit" });
@@ -210,6 +214,7 @@ WantedBy=multi-user.target
 `;
 writeFileSync("/etc/systemd/system/goodwin-vpn-plane.service", unit);
 sh("systemctl", ["daemon-reload"], { stdio: "inherit" });
+spawnSync("systemctl", ["reset-failed", "goodwin-vpn-plane"], { encoding: "utf8" });
 sh("systemctl", ["enable", "--now", "goodwin-vpn-plane"], { stdio: "inherit" });
 sh("systemctl", ["restart", "goodwin-vpn-plane"], { stdio: "inherit" });
 
