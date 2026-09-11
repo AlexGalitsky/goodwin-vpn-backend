@@ -5,6 +5,7 @@
  *   sudo node tools/install_vpn_node.mjs --bin ./bin/agent
  *
  * Prints NODE_TOKEN, guessed IPv4, control port. Does not start Xray/Hy2/TT.
+ * Re-run keeps the existing token and replaces the agent binary (stop + rename).
  */
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -13,6 +14,8 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -43,17 +46,39 @@ if (!binSrc || !existsSync(binSrc)) {
 
 mkdirSync(prefix, { recursive: true });
 const destBin = path.join(prefix, "agent");
-copyFileSync(binSrc, destBin);
-chmodSync(destBin, 0o755);
+const cfgPath = path.join(prefix, "agent.json");
 
-const token = randomBytes(32).toString("hex");
+let token = "";
+let keptToken = false;
+if (existsSync(cfgPath)) {
+  try {
+    const prev = JSON.parse(readFileSync(cfgPath, "utf8"));
+    if (typeof prev.token === "string" && prev.token.trim()) {
+      token = prev.token.trim();
+      keptToken = true;
+    }
+  } catch {
+    token = "";
+  }
+}
+if (!token) {
+  token = randomBytes(32).toString("hex");
+}
+
 const cfg = {
   listen,
   token,
   allow_exec: allowExec,
 };
-const cfgPath = path.join(prefix, "agent.json");
 writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
+
+if (uid === 0 && process.platform === "linux") {
+  spawnSync("systemctl", ["stop", "goodwin-vpn-agent"], { encoding: "utf8" });
+}
+const staged = destBin + ".new";
+copyFileSync(binSrc, staged);
+chmodSync(staged, 0o755);
+renameSync(staged, destBin);
 
 const unit = `[Unit]
 Description=Goodwin VPN node agent
@@ -93,6 +118,7 @@ Agent installed
   config:  ${cfgPath}
   systemd: ${systemd}
   exec:    ${allowExec}
+  token:   ${keptToken ? "kept existing" : "new"}
 
 Paste into admin:
   IPv4:  ${ipGuess}

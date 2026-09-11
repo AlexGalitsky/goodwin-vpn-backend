@@ -34,6 +34,7 @@ type Health struct {
 	AllowExec  bool   `json:"allow_exec"`
 	Version    string `json:"version"`
 	XrayListen bool   `json:"xray_listen"`
+	Hy2Listen  bool   `json:"hy2_listen"`
 }
 
 func (c *Client) Health(ctx context.Context) (Health, error) {

@@ -181,7 +181,11 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
         </label>
         <label>
           Hostname (Hy2 / TT)
-          <input value={hostname} onChange={(e) => setHostname(e.target.value)} />
+          <input
+            value={hostname}
+            onChange={(e) => setHostname(e.target.value)}
+            required={preset !== "stealth"}
+          />
         </label>
         <label>
           Control port
@@ -225,8 +229,9 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
         <h2>Nodes</h2>
         <p className="muted">
           One group per region: each user only sees nodes saved on their group. Apply never
-          attaches every group. After Save groups, click Apply. Health / dead agent →{" "}
-          <code>offline</code>, that node disappears from <code>/sub</code> until it answers again.
+          attaches every group. After Save groups, click Apply (VLESS TCP 443 + Hy2 UDP 443).
+          Health / dead agent → <code>offline</code>, that node disappears from <code>/sub</code>{" "}
+          until it answers again.
         </p>
         <table>
           <thead>

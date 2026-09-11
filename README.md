@@ -51,26 +51,33 @@ scp bin/agent tools/install_vpn_node.mjs root@VPS:/tmp/
 sudo node /tmp/install_vpn_node.mjs --bin /tmp/agent
 ```
 
-Copy IPv4 + token into admin → New node (pick **one** group). Then **Exec** on the node card (`uname -a`, `ss -lntp`). Apply.
+Copy IPv4 + token into admin → New node (pick **one** group, hostname = `CERT_DOMAIN`). Then **Exec** on the node card (`uname -a`, `ss -lntp`). Apply.
+
+Повторный запуск bootstrap на ноде **сохраняет token** и обновляет agent. Не нужен новый Enroll.
 
 ## Two nodes (P4)
 
-1. Update the panel so `/sub` skips dead agents:
+Готово, когда две ноды в разных группах и мёртвый agent пропадает из `/sub`.
+
+## Hysteria2 (P5)
+
+REALITY остаётся на **TCP 443**. Hy2 слушает **UDP 443** с сертификатом Let's Encrypt (`sni` = hostname ноды, без obfs).
+
+1. Обновить панель:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_plane.sh | sudo env CERT_DOMAIN=saturn.goodwin.website bash
 ```
 
-2. Groups: two groups (one per region / VPS).
-3. Titan: Save groups → **only** the first group, then Apply. (An older Apply used to attach every group.)
-4. Second VPS — **node** installer, not the panel:
+2. Обновить **обе** ноды (token не сменится). UDP 443 должен быть открыт:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=YOUR_HOSTNAME bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=titan.goodwin.website bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=mimas.goodwin.website bash
 ```
 
-5. Enroll with the **other** group, create a user in that group, Apply.
-6. Users → Preview: the two users must get different `vless://` hosts.
-7. Dead node: `systemctl stop goodwin-vpn-agent` on one VPS, Refresh the subscription — that host’s line is gone. Start the agent again and it returns.
+3. Проверить сертификат: `ls /etc/letsencrypt/live/titan.goodwin.website/` (и то же для mimas). Если нет — тот же bootstrap с `CERT_DOMAIN`.
+4. Admin → Nodes → Apply на titan и mimas. Status `ready`, Preview содержит `hysteria2://…` с `sni=` hostname.
+5. В `app/` Refresh и Connect по Hy2. VLESS на тех же нодах должен продолжать работать.
 
 `allow_exec` is on by default for development. Turn off with `--no-exec` before giving the panel to anyone else.

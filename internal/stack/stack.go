@@ -62,6 +62,10 @@ func HasFamily(families []string, want string) bool {
 	return false
 }
 
+func NeedsHostname(families []string) bool {
+	return HasFamily(families, FamilyHy2) || HasFamily(families, FamilyTT)
+}
+
 func Validate(spec Spec) error {
 	vless := HasFamily(spec.Families, FamilyVLESS)
 	hy2 := HasFamily(spec.Families, FamilyHy2)

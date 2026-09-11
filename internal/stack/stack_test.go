@@ -22,6 +22,15 @@ func TestValidateTTConflictOn443(t *testing.T) {
 	}
 }
 
+func TestNeedsHostname(t *testing.T) {
+	if !NeedsHostname([]string{FamilyVLESS, FamilyHy2}) {
+		t.Fatal("hy2 needs hostname")
+	}
+	if NeedsHostname([]string{FamilyVLESS}) {
+		t.Fatal("stealth does not")
+	}
+}
+
 func TestValidateStealth(t *testing.T) {
 	err := Validate(Spec{
 		Families: FamiliesForPreset("stealth"),

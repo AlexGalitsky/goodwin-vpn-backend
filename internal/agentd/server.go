@@ -3,6 +3,7 @@ package agentd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 
 	"website.goodwin.vpn/plane/internal/desired"
 	"website.goodwin.vpn/plane/internal/execcmd"
+	"website.goodwin.vpn/plane/internal/hy2conf"
+	"website.goodwin.vpn/plane/internal/hy2run"
 	"website.goodwin.vpn/plane/internal/xrayconf"
 	"website.goodwin.vpn/plane/internal/xrayrun"
 )
@@ -65,13 +68,14 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	host, _ := os.Hostname()
-	port := 443
+	hy2Port := hy2run.ReadPortFile(filepath.Join(s.cfg.Prefix, "hy2.port"))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":          true,
 		"hostname":    host,
 		"allow_exec":  s.cfg.AllowExec,
 		"version":     s.cfg.Version,
-		"xray_listen": xrayrun.Listening(port),
+		"xray_listen": xrayrun.Listening(443),
+		"hy2_listen":  hy2Port > 0 && hy2run.Listening(hy2Port),
 	})
 }
 
@@ -106,16 +110,44 @@ func (s *Server) desired(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if st.VLESS == nil {
-		http.Error(w, "vless required", http.StatusBadRequest)
+	if st.VLESS == nil && st.Hy2 == nil {
+		http.Error(w, "vless or hy2 required", http.StatusBadRequest)
 		return
 	}
-	res, err := applyVLESS(r.Context(), s.cfg.Prefix, *st.VLESS)
-	if err != nil {
-		log.Printf("apply vless: %v", err)
-		writeJSON(w, http.StatusInternalServerError, desired.ApplyResult{OK: false, Detail: err.Error()})
-		return
+	res := desired.ApplyResult{}
+	var parts []string
+	if st.VLESS != nil {
+		got, err := applyVLESS(r.Context(), s.cfg.Prefix, *st.VLESS)
+		if err != nil {
+			log.Printf("apply vless: %v", err)
+			writeJSON(w, http.StatusInternalServerError, desired.ApplyResult{OK: false, Detail: err.Error()})
+			return
+		}
+		res.XrayListen = got.XrayListen
+		res.XrayVersion = got.XrayVersion
+		if got.Detail != "" {
+			parts = append(parts, got.Detail)
+		}
 	}
+	if st.Hy2 != nil {
+		got, err := applyHy2(r.Context(), s.cfg.Prefix, *st.Hy2)
+		if err != nil {
+			log.Printf("apply hy2: %v", err)
+			if st.VLESS == nil {
+				writeJSON(w, http.StatusInternalServerError, desired.ApplyResult{OK: false, Detail: err.Error()})
+				return
+			}
+			parts = append(parts, "hy2: "+err.Error())
+		} else {
+			res.Hy2Listen = got.Hy2Listen
+			res.Hy2Version = got.Hy2Version
+			if got.Detail != "" {
+				parts = append(parts, got.Detail)
+			}
+		}
+	}
+	res.Detail = strings.Join(parts, "; ")
+	res.OK = (st.VLESS == nil || res.XrayListen) && (st.Hy2 == nil || res.Hy2Listen)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -148,6 +180,75 @@ func applyVLESS(ctx context.Context, prefix string, v desired.VLESS) (desired.Ap
 		XrayListen:  listen,
 		XrayVersion: xrayrun.Version(bin),
 		Detail:      cfgPath,
+	}, nil
+}
+
+func applyHy2(ctx context.Context, prefix string, h desired.Hy2) (desired.ApplyResult, error) {
+	if h.Port <= 0 {
+		h.Port = 443
+	}
+	if strings.TrimSpace(h.Hostname) == "" {
+		return desired.ApplyResult{}, fmt.Errorf("hy2 hostname required (Let's Encrypt SAN)")
+	}
+	cert, key := h.Cert, h.Key
+	if cert == "" || key == "" {
+		c, k := hy2conf.CertPaths(h.Hostname)
+		if cert == "" {
+			cert = c
+		}
+		if key == "" {
+			key = k
+		}
+	}
+	if _, err := os.Stat(cert); err != nil {
+		return desired.ApplyResult{}, fmt.Errorf("hy2 cert missing %s — issue Let's Encrypt with CERT_DOMAIN=%s", cert, h.Hostname)
+	}
+	if _, err := os.Stat(key); err != nil {
+		return desired.ApplyResult{}, fmt.Errorf("hy2 key missing %s", key)
+	}
+	if len(h.Users) == 0 {
+		return desired.ApplyResult{}, fmt.Errorf("hy2 users required")
+	}
+	h.Cert, h.Key = cert, key
+	dir := filepath.Join(prefix, "hysteria")
+	bin, err := hy2run.EnsureBinary(ctx, dir)
+	if err != nil {
+		return desired.ApplyResult{}, err
+	}
+	authCmd := filepath.Join(prefix, "hy2-auth")
+	if err := hy2run.WriteFile(authCmd, []byte(hy2conf.AuthScript), 0o755); err != nil {
+		return desired.ApplyResult{}, err
+	}
+	usersRaw, err := hy2conf.UsersJSON(h.Users)
+	if err != nil {
+		return desired.ApplyResult{}, err
+	}
+	if err := hy2run.WriteFile(filepath.Join(prefix, "hy2-users.json"), usersRaw, 0o600); err != nil {
+		return desired.ApplyResult{}, err
+	}
+	raw, err := hy2conf.Build(h, authCmd)
+	if err != nil {
+		return desired.ApplyResult{}, err
+	}
+	cfgPath := filepath.Join(prefix, "hy2.yaml")
+	if err := hy2run.WriteFile(cfgPath, raw, 0o600); err != nil {
+		return desired.ApplyResult{}, err
+	}
+	if err := hy2run.WriteFile(filepath.Join(prefix, "hy2.port"), []byte(fmt.Sprintf("%d\n", h.Port)), 0o644); err != nil {
+		return desired.ApplyResult{}, err
+	}
+	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		if err := hy2run.InstallUnit(bin, cfgPath); err != nil {
+			return desired.ApplyResult{}, err
+		}
+	}
+	time.Sleep(800 * time.Millisecond)
+	listen := hy2run.Listening(h.Port)
+	return desired.ApplyResult{
+		OK:         listen,
+		Hy2Listen:  listen,
+		Hy2Version: hy2run.Version(bin),
+		Detail:     cfgPath,
 	}, nil
 }
 

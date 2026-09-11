@@ -3,6 +3,7 @@ package agentd
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -55,5 +56,40 @@ func TestHealthAndExec(t *testing.T) {
 	}
 	if out.ExitCode != 0 || !bytes.Contains([]byte(out.Stdout), []byte("plane-exec")) {
 		t.Fatalf("%+v", out)
+	}
+
+	req, _ = http.NewRequest(http.MethodPut, ts.URL+"/v1/desired", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty desired status %d", res.StatusCode)
+	}
+
+	body, _ = json.Marshal(map[string]any{
+		"hy2": map[string]any{
+			"port":     443,
+			"hostname": "no-such.example",
+			"users":    []map[string]string{{"id": "u", "password": "p"}},
+		},
+	})
+	req, _ = http.NewRequest(http.MethodPut, ts.URL+"/v1/desired", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("missing cert status %d body %s", res.StatusCode, raw)
+	}
+	if !bytes.Contains(raw, []byte("cert missing")) {
+		t.Fatalf("body %s", raw)
 	}
 }

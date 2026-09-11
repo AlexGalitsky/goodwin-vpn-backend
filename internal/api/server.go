@@ -394,6 +394,10 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if stack.NeedsHostname(spec.Families) && strings.TrimSpace(req.Hostname) == "" {
+		writeErr(w, http.StatusBadRequest, "hostname required for hy2/tt (Let's Encrypt SAN)")
+		return
+	}
 	ports, _ := json.Marshal(spec.Ports)
 	n, err := s.store.CreateNode(r.Context(), store.Node{
 		Name:        req.Name,
@@ -602,18 +606,8 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	keys, err := s.ensureReality(r.Context())
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	var ports stack.Ports
 	_ = json.Unmarshal(n.PortsJSON, &ports)
-	port := ports.VlessTCP
-	if port <= 0 {
-		port = 443
-	}
-	clients := []desired.VLESSClient{}
 	gids, err := s.store.GroupIDsForNode(r.Context(), n.ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -623,13 +617,21 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "assign this node to a group before Apply")
 		return
 	}
-	seen := map[string]bool{}
+
+	wantVLESS := stack.HasFamily(n.Families, stack.FamilyVLESS)
+	wantHy2 := stack.HasFamily(n.Families, stack.FamilyHy2)
+	if wantHy2 && strings.TrimSpace(n.Hostname) == "" {
+		writeErr(w, http.StatusBadRequest, "hostname required for hy2 (Let's Encrypt SAN)")
+		return
+	}
+
+	clients := []desired.VLESSClient{}
+	hy2Users := []desired.Hy2User{}
+	seenVless := map[string]bool{}
+	seenHy2 := map[string]bool{}
 	for _, gid := range gids {
 		g, err := s.store.Group(r.Context(), gid)
 		if err != nil {
-			continue
-		}
-		if !stack.HasFamily(g.Protocols, stack.FamilyVLESS) {
 			continue
 		}
 		users, err := s.store.UsersInGroup(r.Context(), gid)
@@ -637,28 +639,61 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		for _, u := range users {
-			if seen[u.VlessUUID] {
-				continue
+		if wantVLESS && stack.HasFamily(g.Protocols, stack.FamilyVLESS) {
+			for _, u := range users {
+				if seenVless[u.VlessUUID] {
+					continue
+				}
+				seenVless[u.VlessUUID] = true
+				clients = append(clients, desired.VLESSClient{ID: u.VlessUUID, Email: u.ID.String()})
 			}
-			seen[u.VlessUUID] = true
-			clients = append(clients, desired.VLESSClient{
-				ID:    u.VlessUUID,
-				Email: u.ID.String(),
-			})
+		}
+		if wantHy2 && stack.HasFamily(g.Protocols, stack.FamilyHy2) {
+			for _, u := range users {
+				if strings.TrimSpace(u.Hy2Password) == "" || seenHy2[u.Hy2Password] {
+					continue
+				}
+				seenHy2[u.Hy2Password] = true
+				hy2Users = append(hy2Users, desired.Hy2User{ID: u.ID.String(), Password: u.Hy2Password})
+			}
 		}
 	}
-	if len(clients) == 0 {
-		writeErr(w, http.StatusBadRequest, "no vless users in this node's groups — create a user, then Apply again")
+
+	st := desired.State{}
+	if wantVLESS && len(clients) > 0 {
+		keys, err := s.ensureReality(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		port := ports.VlessTCP
+		if port <= 0 {
+			port = 443
+		}
+		st.VLESS = &desired.VLESS{
+			Port:        port,
+			Network:     "grpc",
+			ServiceName: xrayconf.GRPCService,
+			Reality:     keys,
+			Clients:     clients,
+		}
+	}
+	if wantHy2 && len(hy2Users) > 0 {
+		hport := ports.Hy2UDP
+		if hport <= 0 {
+			hport = 443
+		}
+		st.Hy2 = &desired.Hy2{
+			Port:     hport,
+			Hostname: n.Hostname,
+			Users:    hy2Users,
+		}
+	}
+	if st.VLESS == nil && st.Hy2 == nil {
+		writeErr(w, http.StatusBadRequest, "no vless/hy2 users in this node's groups — create a user, then Apply again")
 		return
 	}
-	st := desired.State{VLESS: &desired.VLESS{
-		Port:        port,
-		Network:     "grpc",
-		ServiceName: xrayconf.GRPCService,
-		Reality:     keys,
-		Clients:     clients,
-	}}
+
 	res, err := c.Apply(r.Context(), st)
 	if err != nil {
 		n.Status = "failed"
@@ -666,19 +701,33 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	fams := []string{}
 	if res.XrayListen {
+		fams = append(fams, stack.FamilyVLESS)
+	}
+	if res.Hy2Listen {
+		fams = append(fams, stack.FamilyHy2)
+	}
+	n.AppliedFamilies = fams
+	switch {
+	case len(fams) == 0:
+		n.Status = "failed"
+	case res.OK:
 		n.Status = "ready"
-		n.AppliedFamilies = []string{stack.FamilyVLESS}
-	} else {
+	default:
 		n.Status = "degraded"
-		n.AppliedFamilies = []string{stack.FamilyVLESS}
 	}
 	if err := s.store.UpdateNode(r.Context(), n); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	_ = s.store.Audit(r.Context(), "admin", "apply", &n.ID, res.Detail)
-	writeJSON(w, http.StatusOK, map[string]any{"node_status": n.Status, "apply": res, "clients": len(clients)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_status": n.Status,
+		"apply":       res,
+		"clients":     len(clients),
+		"hy2_users":   len(hy2Users),
+	})
 }
 
 func (s *Server) ensureReality(ctx context.Context) (reality.Keys, error) {
