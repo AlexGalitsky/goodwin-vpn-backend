@@ -19,6 +19,7 @@ import (
 var sqlFS embed.FS
 
 var ErrNotFound = errors.New("not found")
+var ErrConflict = errors.New("conflict")
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -106,6 +107,7 @@ type User struct {
 	Expire      *time.Time
 	Status      string
 	SubToken    string
+	Note        string
 }
 
 type AuditEvent struct {
@@ -118,12 +120,12 @@ type AuditEvent struct {
 }
 
 const userCols = `id, group_id, display_name, vless_uuid, hy2_password, tt_user, tt_password,
-			upload, download, total, expire, status, sub_token`
+			upload, download, total, expire, status, sub_token, note`
 
 func scanUser(sc interface{ Scan(dest ...any) error }) (User, error) {
 	var u User
 	err := sc.Scan(&u.ID, &u.GroupID, &u.DisplayName, &u.VlessUUID, &u.Hy2Password, &u.TTUser, &u.TTPassword,
-		&u.Upload, &u.Download, &u.Total, &u.Expire, &u.Status, &u.SubToken)
+		&u.Upload, &u.Download, &u.Total, &u.Expire, &u.Status, &u.SubToken, &u.Note)
 	return u, err
 }
 
@@ -188,10 +190,10 @@ func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO users (
 			id, group_id, display_name, vless_uuid, hy2_password, tt_user, tt_password,
-			upload, download, total, expire, status, sub_token
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+			upload, download, total, expire, status, sub_token, note
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 		u.ID, u.GroupID, u.DisplayName, u.VlessUUID, u.Hy2Password, u.TTUser, u.TTPassword,
-		u.Upload, u.Download, u.Total, u.Expire, u.Status, u.SubToken,
+		u.Upload, u.Download, u.Total, u.Expire, u.Status, u.SubToken, u.Note,
 	)
 	return u, err
 }
@@ -240,11 +242,23 @@ func (s *Store) SetUserStatus(ctx context.Context, id uuid.UUID, status string) 
 	return nil
 }
 
-func (s *Store) UpdateUserLimits(ctx context.Context, u User) error {
+func (s *Store) UpdateUser(ctx context.Context, u User) error {
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE users SET status=$2, upload=$3, download=$4, total=$5, expire=$6 WHERE id=$1`,
-		u.ID, u.Status, u.Upload, u.Download, u.Total, u.Expire,
+		UPDATE users SET display_name=$2, note=$3, status=$4, upload=$5, download=$6, total=$7, expire=$8
+		WHERE id=$1`,
+		u.ID, u.DisplayName, u.Note, u.Status, u.Upload, u.Download, u.Total, u.Expire,
 	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RotateSubToken(ctx context.Context, id uuid.UUID, newToken string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE users SET sub_token=$2 WHERE id=$1`, id, newToken)
 	if err != nil {
 		return err
 	}
@@ -263,6 +277,71 @@ func (s *Store) RevokeUser(ctx context.Context, id uuid.UUID, newToken string) e
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM tt_links WHERE user_id=$1`, id); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) CountUsersInGroup(ctx context.Context, groupID uuid.UUID) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE group_id=$1`, groupID).Scan(&n)
+	return n, err
+}
+
+func (s *Store) DeleteGroup(ctx context.Context, id uuid.UUID) error {
+	n, err := s.CountUsersInGroup(ctx, id)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrConflict
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM groups WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteNode(ctx context.Context, id uuid.UUID) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM tt_links WHERE node_id=$1`, id); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM nodes WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) LastAudit(ctx context.Context, action string) (AuditEvent, error) {
+	var e AuditEvent
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, at, actor, action, node_id, detail FROM audit_events
+		WHERE action=$1 ORDER BY at DESC LIMIT 1`, action).Scan(
+		&e.ID, &e.At, &e.Actor, &e.Action, &e.NodeID, &e.Detail,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AuditEvent{}, ErrNotFound
+	}
+	return e, err
 }
 
 func (s *Store) CreateNode(ctx context.Context, n Node) (Node, error) {

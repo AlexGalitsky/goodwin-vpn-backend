@@ -99,8 +99,18 @@ TT на **8443** (TCP+UDP). 443 остаётся REALITY+Hy2 — форма/API 
 curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_plane.sh | sudo env CERT_DOMAIN=saturn.goodwin.website bash
 ```
 
-2. Groups: квота GiB и срок в днях (0 = без лимита). Новые пользователи наследуют. Users → Save limits / Disable / Revoke.
-3. Exec → Audit: Apply пишет JSON (`families`, `vless`/`hy2`/`tt` counts).
-4. Проверка: `curl -D- https://saturn.goodwin.website/sub/<token>` — заголовок `subscription-userinfo`. После Revoke тот же URL — 404.
+2. Groups: квота GiB и срок (сутки / неделя / без срока) для новых пользователей. Протоколы группы — чекбоксы.
+3. Users: срок при создании, «+ сутки / + неделя», новая ссылка (ротация), отзыв, удаление.
+4. Инструменты: exec на ноде и аудит. Exec не выключаем.
 
-`allow_exec` is on by default for development. Turn off with `--no-exec` before giving the panel to anyone else.
+## Operator console (P8)
+
+Панель (ноды не трогать):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_plane.sh | sudo env CERT_DOMAIN=saturn.goodwin.website bash
+```
+
+Обзор, поиск пользователей, чекбоксы групп на ноде, удаление пустой группы / пользователя / ноды из панели.
+
+`allow_exec` is on by default. Leave it on for this fleet.

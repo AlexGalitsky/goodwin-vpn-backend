@@ -34,6 +34,19 @@ func TestNeedsHostname(t *testing.T) {
 	}
 }
 
+func TestNormalizeFamilies(t *testing.T) {
+	got, err := NormalizeFamilies([]string{" VLESS ", "hy2", "hy2", "tt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0] != FamilyVLESS {
+		t.Fatalf("%v", got)
+	}
+	if _, err := NormalizeFamilies(nil); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestValidateStealth(t *testing.T) {
 	err := Validate(Spec{
 		Families: FamiliesForPreset("stealth"),

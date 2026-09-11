@@ -53,6 +53,28 @@ func FamiliesForPreset(preset string) []string {
 	}
 }
 
+func NormalizeFamilies(in []string) ([]string, error) {
+	seen := map[string]bool{}
+	var out []string
+	for _, raw := range in {
+		f := strings.ToLower(strings.TrimSpace(raw))
+		switch f {
+		case FamilyVLESS, FamilyHy2, FamilyTT:
+		default:
+			return nil, fmt.Errorf("unknown family %q", raw)
+		}
+		if seen[f] {
+			continue
+		}
+		seen[f] = true
+		out = append(out, f)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("select at least one family")
+	}
+	return out, nil
+}
+
 func HasFamily(families []string, want string) bool {
 	for _, f := range families {
 		if f == want {
