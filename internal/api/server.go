@@ -239,13 +239,16 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	nc := map[string]int{"total": len(nodes)}
-	for _, n := range nodes {
-		st := n.Status
+	fleet := s.probeFleet(ctx, nodes)
+	nc := map[string]int{"total": len(fleet)}
+	alerts := []OverviewAlert{}
+	for _, fn := range fleet {
+		st := fn.Status
 		if st == "" {
 			st = "unknown"
 		}
 		nc[st]++
+		alerts = append(alerts, fleetAlerts(fn)...)
 	}
 	var last any
 	if ev, err := s.store.LastAudit(ctx, "apply"); err == nil {
@@ -268,7 +271,45 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		"last_apply":      last,
 		"reality_dest":    dest,
 		"reality_sni":     sni,
+		"alerts":          alerts,
+		"fleet":           fleet,
 	})
+}
+
+func (s *Server) probeFleet(ctx context.Context, nodes []store.Node) []FleetNode {
+	if len(nodes) == 0 {
+		return []FleetNode{}
+	}
+	type probe struct {
+		i     int
+		n     store.Node
+		alive bool
+		h     agentclient.Health
+	}
+	ch := make(chan probe, len(nodes))
+	for i, n := range nodes {
+		go func(i int, n store.Node) {
+			p := probe{i: i, n: n}
+			if strings.TrimSpace(n.IPv4) != "" && strings.TrimSpace(n.AgentToken) != "" {
+				cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				c := agentclient.New(fmt.Sprintf("http://%s:%d", n.IPv4, n.ControlPort), n.AgentToken)
+				h, err := c.Health(cctx)
+				cancel()
+				if err == nil {
+					p.alive = h.OK
+					p.h = h
+				}
+			}
+			ch <- p
+		}(i, n)
+	}
+	out := make([]FleetNode, len(nodes))
+	for range nodes {
+		p := <-ch
+		s.noteNodeAlive(ctx, &p.n, p.alive)
+		out[p.i] = fleetFromHealth(p.n.ID.String(), p.n.Name, p.n.Status, p.alive, p.h)
+	}
+	return out
 }
 
 func (s *Server) settingValue(ctx context.Context, key string) string {

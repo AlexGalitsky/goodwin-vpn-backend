@@ -16,6 +16,7 @@ import (
 
 	"website.goodwin.vpn/plane/internal/desired"
 	"website.goodwin.vpn/plane/internal/execcmd"
+	"website.goodwin.vpn/plane/internal/hoststat"
 	"website.goodwin.vpn/plane/internal/hy2conf"
 	"website.goodwin.vpn/plane/internal/hy2run"
 	"website.goodwin.vpn/plane/internal/ttconf"
@@ -85,15 +86,35 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	host, _ := os.Hostname()
 	hy2Port := hy2run.ReadPortFile(filepath.Join(s.cfg.Prefix, "hy2.port"))
 	ttPort := ttrun.ReadPortFile(filepath.Join(s.cfg.Prefix, "trusttunnel", "tt.port"))
+	snap := hoststat.Snapshot("/")
+	certs := hoststat.Certs("/etc/letsencrypt/live", time.Now())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          true,
-		"hostname":    host,
-		"allow_exec":  s.cfg.AllowExec,
-		"version":     s.cfg.Version,
-		"xray_listen": xrayrun.Listening(443),
-		"hy2_listen":  hy2Port > 0 && hy2run.Listening(hy2Port),
-		"tt_listen":   ttPort > 0 && ttrun.Listening(),
+		"ok":           true,
+		"hostname":     host,
+		"allow_exec":   s.cfg.AllowExec,
+		"version":      s.cfg.Version,
+		"xray_listen":  xrayrun.Listening(443),
+		"hy2_listen":   hy2Port > 0 && hy2run.Listening(hy2Port),
+		"tt_listen":    ttPort > 0 && ttrun.Listening(),
+		"xray_version": binVersion(filepath.Join(s.cfg.Prefix, "xray", "xray"), xrayrun.Version),
+		"hy2_version":  binVersion(filepath.Join(s.cfg.Prefix, "hysteria", "hysteria"), hy2run.Version),
+		"tt_version":   binVersion(filepath.Join(s.cfg.Prefix, "trusttunnel", "trusttunnel_endpoint"), ttrun.VersionBin),
+		"cpu_load1":    snap.Load1,
+		"cpu_n":        snap.CPUN,
+		"mem_used":     snap.MemUsed,
+		"mem_total":    snap.MemTotal,
+		"disk_used":    snap.DiskUsed,
+		"disk_total":   snap.DiskTotal,
+		"certs":        certs,
 	})
+}
+
+func binVersion(path string, fn func(string) string) string {
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() {
+		return ""
+	}
+	return fn(path)
 }
 
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {

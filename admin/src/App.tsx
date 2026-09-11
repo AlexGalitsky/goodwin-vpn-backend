@@ -48,6 +48,28 @@ type Overview = {
   last_apply: AuditRow | null;
   reality_dest: string;
   reality_sni: string;
+  alerts?: { level: string; text: string }[];
+  fleet?: FleetNode[];
+};
+type FleetCert = { name: string; days_left: number; not_after?: string };
+type FleetNode = {
+  id: string;
+  name: string;
+  status: string;
+  alive: boolean;
+  xray_listen?: boolean;
+  hy2_listen?: boolean;
+  tt_listen?: boolean;
+  xray_version?: string;
+  hy2_version?: string;
+  tt_version?: string;
+  cpu_load1?: number;
+  cpu_n?: number;
+  mem_used?: number;
+  mem_total?: number;
+  disk_used?: number;
+  disk_total?: number;
+  certs?: FleetCert[];
 };
 
 const GiB = 1024 * 1024 * 1024;
@@ -119,6 +141,30 @@ function statusPill(status: string): { cls: string; text: string } {
 }
 function catchErr(e: unknown, fallback: string) {
   return e instanceof Error ? e.message : fallback;
+}
+function diskPct(used?: number, total?: number): string {
+  if (!total) return "—";
+  return `${Math.round(((used || 0) * 100) / total)}%`;
+}
+function healthLine(h: {
+  xray_listen?: boolean;
+  hy2_listen?: boolean;
+  tt_listen?: boolean;
+  xray_version?: string;
+  hy2_version?: string;
+  tt_version?: string;
+  cpu_load1?: number;
+  cpu_n?: number;
+  disk_used?: number;
+  disk_total?: number;
+  certs?: FleetCert[];
+}): string {
+  const listen = [h.xray_listen && "xray", h.hy2_listen && "hy2", h.tt_listen && "tt"].filter(Boolean).join("/") || "не слушает";
+  const ver = [h.xray_version, h.hy2_version, h.tt_version].filter(Boolean).join(" · ") || "ядра —";
+  const cert = h.certs?.[0];
+  const certTxt = cert ? `${cert.name} ${cert.days_left} дн.` : "серт —";
+  const load = h.cpu_n ? `load ${h.cpu_load1 ?? 0}/${h.cpu_n}` : "";
+  return [listen, ver, `диск ${diskPct(h.disk_used, h.disk_total)}`, certTxt, load].filter(Boolean).join(" · ");
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -232,6 +278,11 @@ function OverviewPage({ onError }: { onError: (s: string) => void }) {
           PUBLIC_SUB_BASE не HTTPS ({ov.public_sub_base || "пусто"}). Приложение отклонит ссылки.
         </p>
       ) : null}
+      {(ov.alerts || []).map((a) => (
+        <p key={a.text} className={a.level === "bad" ? "err" : "muted"}>
+          {a.text}
+        </p>
+      ))}
       <div className="stats">
         <div className="stat">
           <b>{ov.users.active}</b>
@@ -275,6 +326,20 @@ function OverviewPage({ onError }: { onError: (s: string) => void }) {
           <p className="muted">Apply ещё не было.</p>
         )}
       </div>
+      {(ov.fleet || []).length ? (
+        <div className="card">
+          <h2>Ноды сейчас</h2>
+          {ov.fleet!.map((n) => {
+            const st = statusPill(n.status);
+            return (
+              <div key={n.id} className="row" style={{ alignItems: "flex-start", marginBottom: 8 }}>
+                <span className={`pill ${st.cls}`}>{n.name}</span>
+                <span className="muted">{healthLine(n)}</span>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -520,7 +585,10 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
                         onClick={async () => {
                           onError("");
                           try {
-                            await api(`/v1/nodes/${n.ID}/health`);
+                            const res = await api<{ health: Parameters<typeof healthLine>[0] }>(
+                              `/v1/nodes/${n.ID}/health`,
+                            );
+                            setApplyLog((p) => ({ ...p, [n.ID]: healthLine(res.health) }));
                             await load();
                           } catch (e) {
                             onError(catchErr(e, "офлайн"));

@@ -33,7 +33,17 @@ func TestHealthAndExec(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Fatalf("status %d", res.StatusCode)
 	}
+	var health struct {
+		OK   bool `json:"ok"`
+		CPUN int  `json:"cpu_n"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&health); err != nil {
+		t.Fatal(err)
+	}
 	res.Body.Close()
+	if !health.OK || health.CPUN < 1 {
+		t.Fatalf("health %+v", health)
+	}
 
 	body, _ := json.Marshal(map[string]any{"shell": "echo plane-exec", "timeout_sec": 5})
 	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/v1/exec", bytes.NewReader(body))

@@ -29,13 +29,29 @@ func New(baseURL, token string) *Client {
 }
 
 type Health struct {
-	OK         bool   `json:"ok"`
-	Hostname   string `json:"hostname"`
-	AllowExec  bool   `json:"allow_exec"`
-	Version    string `json:"version"`
-	XrayListen bool   `json:"xray_listen"`
-	Hy2Listen  bool   `json:"hy2_listen"`
-	TTListen   bool   `json:"tt_listen"`
+	OK          bool    `json:"ok"`
+	Hostname    string  `json:"hostname"`
+	AllowExec   bool    `json:"allow_exec"`
+	Version     string  `json:"version"`
+	XrayListen  bool    `json:"xray_listen"`
+	Hy2Listen   bool    `json:"hy2_listen"`
+	TTListen    bool    `json:"tt_listen"`
+	XrayVersion string  `json:"xray_version,omitempty"`
+	Hy2Version  string  `json:"hy2_version,omitempty"`
+	TTVersion   string  `json:"tt_version,omitempty"`
+	CPULoad1    float64 `json:"cpu_load1,omitempty"`
+	CPUN        int     `json:"cpu_n,omitempty"`
+	MemUsed     int64   `json:"mem_used,omitempty"`
+	MemTotal    int64   `json:"mem_total,omitempty"`
+	DiskUsed    int64   `json:"disk_used,omitempty"`
+	DiskTotal   int64   `json:"disk_total,omitempty"`
+	Certs       []Cert  `json:"certs,omitempty"`
+}
+
+type Cert struct {
+	Name     string `json:"name"`
+	NotAfter string `json:"not_after,omitempty"`
+	DaysLeft int    `json:"days_left"`
 }
 
 func (c *Client) Health(ctx context.Context) (Health, error) {
