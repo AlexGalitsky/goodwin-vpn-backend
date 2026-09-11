@@ -216,6 +216,12 @@ func (s *Store) CreateNode(ctx context.Context, n Node) (Node, error) {
 	if n.Status == "" {
 		n.Status = "pending"
 	}
+	if n.Families == nil {
+		n.Families = []string{}
+	}
+	if n.AppliedFamilies == nil {
+		n.AppliedFamilies = []string{}
+	}
 	if len(n.PortsJSON) == 0 {
 		n.PortsJSON = json.RawMessage(`{}`)
 	}
@@ -228,6 +234,12 @@ func (s *Store) CreateNode(ctx context.Context, n Node) (Node, error) {
 }
 
 func (s *Store) UpdateNode(ctx context.Context, n Node) error {
+	if n.Families == nil {
+		n.Families = []string{}
+	}
+	if n.AppliedFamilies == nil {
+		n.AppliedFamilies = []string{}
+	}
 	_, err := s.pool.Exec(ctx, `
 		UPDATE nodes SET name=$2, ipv4=$3, ipv6=$4, hostname=$5, control_port=$6,
 			families=$7, applied_families=$8, ports=$9, status=$10, agent_token=$11
