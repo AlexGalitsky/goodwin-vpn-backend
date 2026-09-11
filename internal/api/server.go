@@ -62,9 +62,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/me", s.withAuth(s.me))
 	s.mux.HandleFunc("GET /v1/groups", s.withAuth(s.listGroups))
 	s.mux.HandleFunc("POST /v1/groups", s.withAuth(s.createGroup))
+	s.mux.HandleFunc("PATCH /v1/groups/{id}", s.withAuth(s.patchGroup))
 	s.mux.HandleFunc("GET /v1/users", s.withAuth(s.listUsers))
 	s.mux.HandleFunc("POST /v1/users", s.withAuth(s.createUser))
 	s.mux.HandleFunc("PATCH /v1/users/{id}", s.withAuth(s.patchUser))
+	s.mux.HandleFunc("POST /v1/users/{id}/revoke", s.withAuth(s.revokeUser))
+	s.mux.HandleFunc("GET /v1/audit", s.withAuth(s.listAudit))
 	s.mux.HandleFunc("GET /v1/nodes", s.withAuth(s.listNodes))
 	s.mux.HandleFunc("POST /v1/nodes", s.withAuth(s.createNode))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/enroll", s.withAuth(s.enrollNode))
@@ -235,8 +238,10 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name      string   `json:"name"`
-		Protocols []string `json:"protocols"`
+		Name               string   `json:"name"`
+		Protocols          []string `json:"protocols"`
+		QuotaBytes         int64    `json:"quota_bytes"`
+		ExpireDefaultHours int      `json:"expire_default_hours"`
 	}
 	if err := readJSON(r, &req); err != nil || strings.TrimSpace(req.Name) == "" {
 		writeErr(w, http.StatusBadRequest, "name required")
@@ -245,12 +250,71 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	if len(req.Protocols) == 0 {
 		req.Protocols = []string{"vless", "hy2", "tt"}
 	}
-	g, err := s.store.CreateGroup(r.Context(), req.Name, req.Protocols)
+	if req.QuotaBytes < 0 {
+		req.QuotaBytes = 0
+	}
+	if req.ExpireDefaultHours < 0 {
+		req.ExpireDefaultHours = 0
+	}
+	g, err := s.store.CreateGroup(r.Context(), req.Name, req.Protocols, req.QuotaBytes, req.ExpireDefaultHours)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, g)
+}
+
+func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "id")
+		return
+	}
+	g, err := s.store.Group(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "group")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var req struct {
+		Name               *string `json:"name"`
+		QuotaBytes         *int64  `json:"quota_bytes"`
+		ExpireDefaultHours *int    `json:"expire_default_hours"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeErr(w, http.StatusBadRequest, "name")
+			return
+		}
+		g.Name = name
+	}
+	if req.QuotaBytes != nil {
+		if *req.QuotaBytes < 0 {
+			writeErr(w, http.StatusBadRequest, "quota_bytes")
+			return
+		}
+		g.QuotaBytes = *req.QuotaBytes
+	}
+	if req.ExpireDefaultHours != nil {
+		if *req.ExpireDefaultHours < 0 {
+			writeErr(w, http.StatusBadRequest, "expire_default_hours")
+			return
+		}
+		g.ExpireDefaultHours = *req.ExpireDefaultHours
+	}
+	if err := s.store.UpdateGroup(r.Context(), g); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, g)
 }
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +344,8 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		GroupID     string `json:"group_id"`
 		DisplayName string `json:"display_name"`
+		Total       *int64 `json:"total"`
+		ExpireUnix  *int64 `json:"expire_unix"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json")
@@ -290,21 +356,48 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "group_id")
 		return
 	}
+	g, err := s.store.Group(r.Context(), gid)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusBadRequest, "group_id")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	token, err := randomToken(16)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	u, err := s.store.CreateUser(r.Context(), store.User{
+	u := store.User{
 		GroupID:     gid,
 		DisplayName: req.DisplayName,
 		VlessUUID:   uuid.NewString(),
 		Hy2Password: randomHex(12),
 		TTUser:      "u" + randomHex(4),
 		TTPassword:  randomHex(12),
+		Total:       g.QuotaBytes,
 		Status:      "active",
 		SubToken:    token,
-	})
+	}
+	if req.Total != nil {
+		if *req.Total < 0 {
+			writeErr(w, http.StatusBadRequest, "total")
+			return
+		}
+		u.Total = *req.Total
+	}
+	if req.ExpireUnix != nil {
+		if *req.ExpireUnix > 0 {
+			t := time.Unix(*req.ExpireUnix, 0).UTC()
+			u.Expire = &t
+		}
+	} else if g.ExpireDefaultHours > 0 {
+		t := time.Now().UTC().Add(time.Duration(g.ExpireDefaultHours) * time.Hour)
+		u.Expire = &t
+	}
+	u, err = s.store.CreateUser(r.Context(), u)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -318,19 +411,8 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "id")
 		return
 	}
-	var req struct {
-		Status string `json:"status"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-	st := strings.ToLower(strings.TrimSpace(req.Status))
-	if st != "active" && st != "disabled" {
-		writeErr(w, http.StatusBadRequest, "status must be active or disabled")
-		return
-	}
-	if err := s.store.SetUserStatus(r.Context(), id, st); err != nil {
+	u, err := s.store.User(r.Context(), id)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "user")
 			return
@@ -338,8 +420,118 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.store.Audit(r.Context(), "admin", "user_status", &id, st)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": st})
+	var req struct {
+		Status     *string `json:"status"`
+		Upload     *int64  `json:"upload"`
+		Download   *int64  `json:"download"`
+		Total      *int64  `json:"total"`
+		ExpireUnix *int64  `json:"expire_unix"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.Status == nil && req.Upload == nil && req.Download == nil && req.Total == nil && req.ExpireUnix == nil {
+		writeErr(w, http.StatusBadRequest, "no fields")
+		return
+	}
+	if req.Status != nil {
+		st := strings.ToLower(strings.TrimSpace(*req.Status))
+		if st != "active" && st != "disabled" {
+			writeErr(w, http.StatusBadRequest, "status must be active or disabled")
+			return
+		}
+		u.Status = st
+	}
+	if req.Upload != nil {
+		if *req.Upload < 0 {
+			writeErr(w, http.StatusBadRequest, "upload")
+			return
+		}
+		u.Upload = *req.Upload
+	}
+	if req.Download != nil {
+		if *req.Download < 0 {
+			writeErr(w, http.StatusBadRequest, "download")
+			return
+		}
+		u.Download = *req.Download
+	}
+	if req.Total != nil {
+		if *req.Total < 0 {
+			writeErr(w, http.StatusBadRequest, "total")
+			return
+		}
+		u.Total = *req.Total
+	}
+	if req.ExpireUnix != nil {
+		if *req.ExpireUnix <= 0 {
+			u.Expire = nil
+		} else {
+			t := time.Unix(*req.ExpireUnix, 0).UTC()
+			u.Expire = &t
+		}
+	}
+	if err := s.store.UpdateUserLimits(r.Context(), u); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.store.Audit(r.Context(), "admin", "user_patch", &id, u.Status)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": u})
+}
+
+func (s *Server) revokeUser(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "id")
+		return
+	}
+	u, err := s.store.User(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "user")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	token, err := randomToken(16)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.store.RevokeUser(r.Context(), id, token); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.store.DeleteTTLinksForUser(r.Context(), id)
+	_ = s.store.Audit(r.Context(), "admin", "revoke", &id, u.DisplayName)
+	applied := 0
+	nids, err := s.store.NodeIDsForGroup(r.Context(), u.GroupID)
+	if err == nil {
+		for _, nid := range nids {
+			n, err := s.store.Node(r.Context(), nid)
+			if err != nil {
+				continue
+			}
+			if _, _, err := s.applyStoredNode(r.Context(), n, true); err == nil {
+				applied++
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied_nodes": applied})
+}
+
+func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
+	ev, err := s.store.ListAudit(r.Context(), 100)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if ev == nil {
+		ev = []store.AuditEvent{}
+	}
+	writeJSON(w, http.StatusOK, ev)
 }
 
 func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
@@ -601,31 +793,42 @@ func (s *Server) nodeExec(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
-	c, n, err := s.agentFor(r)
+	_, n, err := s.agentFor(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var ports stack.Ports
-	_ = json.Unmarshal(n.PortsJSON, &ports)
-	gids, err := s.store.GroupIDsForNode(r.Context(), n.ID)
+	out, code, err := s.applyStoredNode(r.Context(), n, false)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeErr(w, code, err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty bool) (map[string]any, int, error) {
+	if strings.TrimSpace(n.IPv4) == "" || strings.TrimSpace(n.AgentToken) == "" {
+		return nil, http.StatusBadRequest, errors.New("node not enrolled")
+	}
+	c := agentclient.New(fmt.Sprintf("http://%s:%d", n.IPv4, n.ControlPort), n.AgentToken)
+	var ports stack.Ports
+	_ = json.Unmarshal(n.PortsJSON, &ports)
+	gids, err := s.store.GroupIDsForNode(ctx, n.ID)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
 	if len(gids) == 0 {
-		writeErr(w, http.StatusBadRequest, "assign this node to a group before Apply")
-		return
+		return nil, http.StatusBadRequest, errors.New("assign this node to a group before Apply")
 	}
 
 	wantVLESS := stack.HasFamily(n.Families, stack.FamilyVLESS)
 	wantHy2 := stack.HasFamily(n.Families, stack.FamilyHy2)
 	wantTT := stack.HasFamily(n.Families, stack.FamilyTT)
 	if (wantHy2 || wantTT) && strings.TrimSpace(n.Hostname) == "" {
-		writeErr(w, http.StatusBadRequest, "hostname required for hy2/tt (Let's Encrypt SAN)")
-		return
+		return nil, http.StatusBadRequest, errors.New("hostname required for hy2/tt (Let's Encrypt SAN)")
 	}
 
+	now := time.Now()
 	clients := []desired.VLESSClient{}
 	hy2Users := []desired.Hy2User{}
 	ttUsers := []desired.TTUser{}
@@ -633,17 +836,19 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 	seenHy2 := map[string]bool{}
 	seenTT := map[string]bool{}
 	for _, gid := range gids {
-		g, err := s.store.Group(r.Context(), gid)
+		g, err := s.store.Group(ctx, gid)
 		if err != nil {
 			continue
 		}
-		users, err := s.store.UsersInGroup(r.Context(), gid)
+		users, err := s.store.UsersInGroup(ctx, gid)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
+			return nil, http.StatusInternalServerError, err
 		}
 		if wantVLESS && stack.HasFamily(g.Protocols, stack.FamilyVLESS) {
 			for _, u := range users {
+				if !sub.Entitled(u.Status, u.Expire, u.Upload, u.Download, u.Total, now) {
+					continue
+				}
 				if seenVless[u.VlessUUID] {
 					continue
 				}
@@ -653,6 +858,9 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 		}
 		if wantHy2 && stack.HasFamily(g.Protocols, stack.FamilyHy2) {
 			for _, u := range users {
+				if !sub.Entitled(u.Status, u.Expire, u.Upload, u.Download, u.Total, now) {
+					continue
+				}
 				if strings.TrimSpace(u.Hy2Password) == "" || seenHy2[u.Hy2Password] {
 					continue
 				}
@@ -662,6 +870,9 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 		}
 		if wantTT && stack.HasFamily(g.Protocols, stack.FamilyTT) {
 			for _, u := range users {
+				if !sub.Entitled(u.Status, u.Expire, u.Upload, u.Download, u.Total, now) {
+					continue
+				}
 				if strings.TrimSpace(u.TTUser) == "" || strings.TrimSpace(u.TTPassword) == "" || seenTT[u.TTUser] {
 					continue
 				}
@@ -672,11 +883,10 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	st := desired.State{}
-	if wantVLESS && len(clients) > 0 {
-		keys, err := s.ensureReality(r.Context())
+	if wantVLESS && (len(clients) > 0 || allowEmpty) {
+		keys, err := s.ensureReality(ctx)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
+			return nil, http.StatusInternalServerError, err
 		}
 		port := ports.VlessTCP
 		if port <= 0 {
@@ -719,16 +929,14 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if st.VLESS == nil && st.Hy2 == nil && st.TT == nil {
-		writeErr(w, http.StatusBadRequest, "no vless/hy2/tt users in this node's groups — create a user, then Apply again")
-		return
+		return nil, http.StatusBadRequest, errors.New("no vless/hy2/tt users in this node's groups — create a user, then Apply again")
 	}
 
-	res, err := c.Apply(r.Context(), st)
+	res, err := c.Apply(ctx, st)
 	if err != nil {
 		n.Status = "failed"
-		_ = s.store.UpdateNode(r.Context(), n)
-		writeErr(w, http.StatusBadGateway, err.Error())
-		return
+		_ = s.store.UpdateNode(ctx, n)
+		return nil, http.StatusBadGateway, err
 	}
 	fams := []string{}
 	if res.XrayListen {
@@ -749,9 +957,8 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 	default:
 		n.Status = "degraded"
 	}
-	if err := s.store.UpdateNode(r.Context(), n); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
+	if err := s.store.UpdateNode(ctx, n); err != nil {
+		return nil, http.StatusInternalServerError, err
 	}
 	if res.TTListen && len(res.TTLinks) > 0 {
 		links := map[uuid.UUID]string{}
@@ -762,18 +969,26 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 			}
 			links[id] = l.Link
 		}
-		_ = s.store.ReplaceTTLinks(r.Context(), n.ID, links)
+		_ = s.store.ReplaceTTLinks(ctx, n.ID, links)
 	} else if !wantTT {
-		_ = s.store.DeleteTTLinksForNode(r.Context(), n.ID)
+		_ = s.store.DeleteTTLinksForNode(ctx, n.ID)
 	}
-	_ = s.store.Audit(r.Context(), "admin", "apply", &n.ID, res.Detail)
-	writeJSON(w, http.StatusOK, map[string]any{
+	detail, _ := json.Marshal(map[string]any{
+		"status":   n.Status,
+		"families": fams,
+		"vless":    len(clients),
+		"hy2":      len(hy2Users),
+		"tt":       len(ttUsers),
+		"agent":    res.Detail,
+	})
+	_ = s.store.Audit(ctx, "admin", "apply", &n.ID, string(detail))
+	return map[string]any{
 		"node_status": n.Status,
 		"apply":       res,
 		"clients":     len(clients),
 		"hy2_users":   len(hy2Users),
 		"tt_users":    len(ttUsers),
-	})
+	}, 0, nil
 }
 
 func (s *Server) ensureReality(ctx context.Context) (reality.Keys, error) {
@@ -854,22 +1069,13 @@ func (s *Server) previewUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "id")
 		return
 	}
-	users, err := s.store.ListUsers(r.Context())
+	u, err := s.store.User(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	var u store.User
-	found := false
-	for _, x := range users {
-		if x.ID == id {
-			u = x
-			found = true
-			break
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "user")
+			return
 		}
-	}
-	if !found {
-		writeErr(w, http.StatusNotFound, "user")
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	body, hdr, status, err := s.renderUser(r.Context(), u)
@@ -917,7 +1123,10 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 	if hdr.Title == "" {
 		hdr.Title = "Goodwin"
 	}
-	if u.Status != "active" {
+	if u.Expire != nil && !u.Expire.IsZero() {
+		hdr.ExpireUnix = u.Expire.UTC().Unix()
+	}
+	if !sub.Entitled(u.Status, u.Expire, u.Upload, u.Download, u.Total, time.Now()) {
 		return "", hdr, http.StatusOK, nil
 	}
 	groups, err := s.store.ListGroups(ctx)
@@ -1005,6 +1214,9 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 			lines = append(lines, line)
 		}
 	}
+	if len(lines) == 0 {
+		return "", hdr, http.StatusOK, nil
+	}
 	res, err := sub.Render(sub.User{
 		DisplayName: u.DisplayName,
 		VlessUUID:   u.VlessUUID,
@@ -1014,10 +1226,14 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 		Upload:      u.Upload,
 		Download:    u.Download,
 		Total:       u.Total,
+		Expire:      u.Expire,
 		Status:      u.Status,
 	}, lines)
 	if err != nil {
-		return "", sub.Headers{}, http.StatusNotFound, err
+		if strings.Contains(err.Error(), "no share links") {
+			return "", hdr, http.StatusOK, nil
+		}
+		return "", sub.Headers{}, http.StatusInternalServerError, err
 	}
 	return res.Body, res.Headers, http.StatusOK, nil
 }

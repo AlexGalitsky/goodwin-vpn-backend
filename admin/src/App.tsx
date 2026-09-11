@@ -1,15 +1,62 @@
 import { FormEvent, useEffect, useState } from "react";
 
-type Group = { ID: string; Name: string; Protocols: string[] };
+type Group = {
+  ID: string;
+  Name: string;
+  Protocols: string[];
+  QuotaBytes: number;
+  ExpireDefaultHours: number;
+};
 type UserRow = {
   ID: string;
   DisplayName: string;
   SubToken: string;
   Status: string;
   GroupID: string;
+  Upload: number;
+  Download: number;
+  Total: number;
+  Expire: string | null;
   sub_url: string;
   import_url: string;
 };
+type AuditRow = {
+  ID: string;
+  At: string;
+  Actor: string;
+  Action: string;
+  NodeID: string | null;
+  Detail: string;
+};
+
+const GiB = 1024 * 1024 * 1024;
+
+function bytesToGiB(n: number): string {
+  if (!n) return "0";
+  const v = n / GiB;
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
+
+function giBToBytes(raw: string): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.round(n * GiB);
+}
+
+function toLocalInput(rfc: string | null): string {
+  if (!rfc) return "";
+  const d = new Date(rfc);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function localInputToUnix(v: string): number {
+  if (!v) return 0;
+  const t = new Date(v).getTime();
+  if (Number.isNaN(t)) return 0;
+  return Math.floor(t / 1000);
+}
 type NodeRow = {
   ID: string;
   Name: string;
@@ -83,7 +130,12 @@ export default function App() {
       {tab === "nodes" && <Nodes onError={setErr} />}
       {tab === "users" && <Users onError={setErr} />}
       {tab === "groups" && <Groups onError={setErr} />}
-      {tab === "exec" && <Exec onError={setErr} />}
+      {tab === "exec" && (
+        <div className="grid">
+          <Exec onError={setErr} />
+          <AuditLog onError={setErr} />
+        </div>
+      )}
     </div>
   );
 }
@@ -397,64 +449,154 @@ function Users({ onError }: { onError: (s: string) => void }) {
           </p>
         ) : null}
         {users.map((u) => (
-          <div key={u.ID} style={{ marginBottom: 16 }}>
-            <div>
-              <strong>{u.DisplayName || u.ID}</strong>{" "}
-              <span className="muted">
-                {u.Status}
-                {groups.find((g) => g.ID === u.GroupID)
-                  ? ` · ${groups.find((g) => g.ID === u.GroupID)?.Name}`
-                  : ""}
-              </span>
-            </div>
-            <div className="muted">{u.sub_url}</div>
-            <div className="row" style={{ marginTop: 8 }}>
-              <button
-                type="button"
-                onClick={() => void navigator.clipboard.writeText(u.sub_url)}
-              >
-                Copy HTTPS URL
-              </button>
-              <button
-                type="button"
-                onClick={() => void navigator.clipboard.writeText(u.import_url)}
-              >
-                Copy goodwin://import
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    const next = u.Status === "disabled" ? "active" : "disabled";
-                    await api(`/v1/users/${u.ID}`, {
-                      method: "PATCH",
-                      body: JSON.stringify({ status: next }),
-                    });
-                    await load();
-                  } catch (e) {
-                    onError(e instanceof Error ? e.message : "status");
-                  }
-                }}
-              >
-                {u.Status === "disabled" ? "Enable" : "Disable"}
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    const p = await api<{ body: string }>(`/v1/users/${u.ID}/preview`);
-                    setPreview(p.body);
-                  } catch (e) {
-                    onError(e instanceof Error ? e.message : "preview");
-                  }
-                }}
-              >
-                Preview body
-              </button>
-            </div>
-          </div>
+          <UserCard
+            key={u.ID}
+            u={u}
+            groups={groups}
+            onError={onError}
+            onReload={load}
+            onPreview={(body) => setPreview(body)}
+          />
         ))}
-        {preview !== null ? <pre>{preview || "(empty — disabled or no ready nodes)"}</pre> : null}
+        {preview !== null ? <pre>{preview || "(empty — disabled, expired, over quota, or no ready nodes)"}</pre> : null}
+      </div>
+    </div>
+  );
+}
+
+function UserCard({
+  u,
+  groups,
+  onError,
+  onReload,
+  onPreview,
+}: {
+  u: UserRow;
+  groups: Group[];
+  onError: (s: string) => void;
+  onReload: () => Promise<void>;
+  onPreview: (body: string) => void;
+}) {
+  const [quotaGiB, setQuotaGiB] = useState(bytesToGiB(u.Total));
+  const [expireLocal, setExpireLocal] = useState(toLocalInput(u.Expire));
+  useEffect(() => {
+    setQuotaGiB(bytesToGiB(u.Total));
+    setExpireLocal(toLocalInput(u.Expire));
+  }, [u.Total, u.Expire]);
+  const groupName = groups.find((g) => g.ID === u.GroupID)?.Name;
+  const used = (u.Upload || 0) + (u.Download || 0);
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div>
+        <strong>{u.DisplayName || u.ID}</strong>{" "}
+        <span className="muted">
+          {u.Status}
+          {groupName ? ` · ${groupName}` : ""}
+          {u.Expire ? ` · expire ${new Date(u.Expire).toLocaleString()}` : " · no expire"}
+          {` · ${used} / ${u.Total || "∞"} bytes`}
+        </span>
+      </div>
+      {u.Status !== "revoked" ? <div className="muted">{u.sub_url}</div> : (
+        <div className="muted">Revoked — old URL returns 404. Restore to issue a new link.</div>
+      )}
+      <div className="row" style={{ marginTop: 8 }}>
+        <label>
+          Quota GiB
+          <input
+            value={quotaGiB}
+            onChange={(e) => setQuotaGiB(e.target.value)}
+            style={{ width: 88 }}
+          />
+        </label>
+        <label>
+          Expire
+          <input
+            type="datetime-local"
+            value={expireLocal}
+            onChange={(e) => setExpireLocal(e.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              await api(`/v1/users/${u.ID}`, {
+                method: "PATCH",
+                body: JSON.stringify({
+                  total: giBToBytes(quotaGiB),
+                  expire_unix: localInputToUnix(expireLocal),
+                }),
+              });
+              await onReload();
+            } catch (e) {
+              onError(e instanceof Error ? e.message : "limits");
+            }
+          }}
+        >
+          Save limits
+        </button>
+        {u.Status !== "revoked" ? (
+          <button
+            type="button"
+            onClick={() => void navigator.clipboard.writeText(u.sub_url)}
+          >
+            Copy HTTPS URL
+          </button>
+        ) : null}
+        {u.Status !== "revoked" ? (
+          <button
+            type="button"
+            onClick={() => void navigator.clipboard.writeText(u.import_url)}
+          >
+            Copy goodwin://import
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              const next = u.Status === "active" ? "disabled" : "active";
+              await api(`/v1/users/${u.ID}`, {
+                method: "PATCH",
+                body: JSON.stringify({ status: next }),
+              });
+              await onReload();
+            } catch (e) {
+              onError(e instanceof Error ? e.message : "status");
+            }
+          }}
+        >
+          {u.Status === "active" ? "Disable" : "Enable"}
+        </button>
+        {u.Status !== "revoked" ? (
+          <button
+            type="button"
+            onClick={async () => {
+              if (!window.confirm(`Revoke ${u.DisplayName || u.ID}? Old URL will 404.`)) return;
+              try {
+                await api(`/v1/users/${u.ID}/revoke`, { method: "POST", body: "{}" });
+                await onReload();
+              } catch (e) {
+                onError(e instanceof Error ? e.message : "revoke");
+              }
+            }}
+          >
+            Revoke
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              const p = await api<{ body: string }>(`/v1/users/${u.ID}/preview`);
+              onPreview(p.body);
+            } catch (e) {
+              onError(e instanceof Error ? e.message : "preview");
+            }
+          }}
+        >
+          Preview body
+        </button>
       </div>
     </div>
   );
@@ -463,6 +605,8 @@ function Users({ onError }: { onError: (s: string) => void }) {
 function Groups({ onError }: { onError: (s: string) => void }) {
   const [groups, setGroups] = useState<Group[]>([]);
   const [name, setName] = useState("");
+  const [quotaGiB, setQuotaGiB] = useState("0");
+  const [expireDays, setExpireDays] = useState("0");
   async function load() {
     try {
       setGroups(await api("/v1/groups"));
@@ -482,9 +626,16 @@ function Groups({ onError }: { onError: (s: string) => void }) {
           try {
             await api("/v1/groups", {
               method: "POST",
-              body: JSON.stringify({ name, protocols: ["vless", "hy2", "tt"] }),
+              body: JSON.stringify({
+                name,
+                protocols: ["vless", "hy2", "tt"],
+                quota_bytes: giBToBytes(quotaGiB),
+                expire_default_hours: Math.round(Number(expireDays) * 24) || 0,
+              }),
             });
             setName("");
+            setQuotaGiB("0");
+            setExpireDays("0");
             await load();
           } catch (err) {
             onError(err instanceof Error ? err.message : "create");
@@ -492,20 +643,90 @@ function Groups({ onError }: { onError: (s: string) => void }) {
         }}
       >
         <h2>New group</h2>
+        <p className="muted">Quota and expire apply to users created in this group. 0 = unlimited / no expiry.</p>
         <label>
           Name
           <input value={name} onChange={(e) => setName(e.target.value)} required />
+        </label>
+        <label>
+          Default quota GiB
+          <input value={quotaGiB} onChange={(e) => setQuotaGiB(e.target.value)} />
+        </label>
+        <label>
+          Default expire (days)
+          <input value={expireDays} onChange={(e) => setExpireDays(e.target.value)} />
         </label>
         <button className="primary" type="submit">
           Create
         </button>
       </form>
-      <div className="card">
+      <div className="card grid">
         {groups.map((g) => (
-          <div key={g.ID}>
-            {g.Name} <span className="muted">{(g.Protocols || []).join(", ")}</span>
-          </div>
+          <GroupRow key={g.ID} g={g} onError={onError} onReload={load} />
         ))}
+      </div>
+    </div>
+  );
+}
+
+function GroupRow({
+  g,
+  onError,
+  onReload,
+}: {
+  g: Group;
+  onError: (s: string) => void;
+  onReload: () => Promise<void>;
+}) {
+  const [quotaGiB, setQuotaGiB] = useState(bytesToGiB(g.QuotaBytes));
+  const [expireDays, setExpireDays] = useState(
+    g.ExpireDefaultHours ? String(g.ExpireDefaultHours / 24) : "0",
+  );
+  useEffect(() => {
+    setQuotaGiB(bytesToGiB(g.QuotaBytes));
+    setExpireDays(g.ExpireDefaultHours ? String(g.ExpireDefaultHours / 24) : "0");
+  }, [g.QuotaBytes, g.ExpireDefaultHours]);
+  return (
+    <div>
+      <div>
+        {g.Name} <span className="muted">{(g.Protocols || []).join(", ")}</span>
+      </div>
+      <div className="row" style={{ marginTop: 8 }}>
+        <label>
+          Quota GiB
+          <input
+            value={quotaGiB}
+            onChange={(e) => setQuotaGiB(e.target.value)}
+            style={{ width: 88 }}
+          />
+        </label>
+        <label>
+          Expire days
+          <input
+            value={expireDays}
+            onChange={(e) => setExpireDays(e.target.value)}
+            style={{ width: 88 }}
+          />
+        </label>
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              await api(`/v1/groups/${g.ID}`, {
+                method: "PATCH",
+                body: JSON.stringify({
+                  quota_bytes: giBToBytes(quotaGiB),
+                  expire_default_hours: Math.round(Number(expireDays) * 24) || 0,
+                }),
+              });
+              await onReload();
+            } catch (e) {
+              onError(e instanceof Error ? e.message : "group");
+            }
+          }}
+        >
+          Save
+        </button>
       </div>
     </div>
   );
@@ -564,5 +785,48 @@ function Exec({ onError }: { onError: (s: string) => void }) {
       </button>
       {out ? <pre>{out}</pre> : null}
     </form>
+  );
+}
+
+function AuditLog({ onError }: { onError: (s: string) => void }) {
+  const [rows, setRows] = useState<AuditRow[]>([]);
+  async function load() {
+    try {
+      setRows(await api("/v1/audit"));
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "audit");
+    }
+  }
+  useEffect(() => {
+    void load();
+  }, []);
+  return (
+    <div className="card">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2>Audit</h2>
+        <button type="button" onClick={() => void load()}>
+          Refresh
+        </button>
+      </div>
+      <p className="muted">Apply, enroll, exec, revoke, user patch.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Action</th>
+            <th>Detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((e) => (
+            <tr key={e.ID}>
+              <td className="muted">{new Date(e.At).toLocaleString()}</td>
+              <td>{e.Action}</td>
+              <td className="muted">{e.Detail}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

@@ -89,4 +89,18 @@ TT на **8443** (TCP+UDP). 443 остаётся REALITY+Hy2 — форма/API 
 3. Apply на titan и mimas. Preview: третья строка `tt://?…` (официальный deeplink, не self-signed).
 4. В `app/` Refresh и Connect по TrustTunnel. VLESS и Hy2 не должны сломаться.
 
+## Quotas, expire, revoke (P7)
+
+Только панель (ноды не трогать). Disable по-прежнему даёт **пустое 200** — Refresh в приложении снимает ноды. Revoke меняет токен: старый URL отвечает **404** (клиент ноды не трогает, пока пользователь сам не обновит ссылку).
+
+1. Обновить панель:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_plane.sh | sudo env CERT_DOMAIN=saturn.goodwin.website bash
+```
+
+2. Groups: квота GiB и срок в днях (0 = без лимита). Новые пользователи наследуют. Users → Save limits / Disable / Revoke.
+3. Exec → Audit: Apply пишет JSON (`families`, `vless`/`hy2`/`tt` counts).
+4. Проверка: `curl -D- https://saturn.goodwin.website/sub/<token>` — заголовок `subscription-userinfo`. После Revoke тот же URL — 404.
+
 `allow_exec` is on by default for development. Turn off with `--no-exec` before giving the panel to anyone else.

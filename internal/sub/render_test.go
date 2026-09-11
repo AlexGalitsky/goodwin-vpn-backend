@@ -89,6 +89,28 @@ func TestRealityGRPCLink(t *testing.T) {
 	}
 }
 
+func TestWriteHeadersUserinfo(t *testing.T) {
+	h := map[string]string{}
+	WriteHeaders(h, Headers{
+		Title:         "Panel",
+		IntervalHours: 24,
+		Upload:        1,
+		Download:      2,
+		Total:         3,
+		ExpireUnix:    1700000000,
+	})
+	if h["profile-title"] != "Panel" {
+		t.Fatalf("title %q", h["profile-title"])
+	}
+	if h["profile-update-interval"] != "24" {
+		t.Fatalf("interval %q", h["profile-update-interval"])
+	}
+	want := "upload=1; download=2; total=3; expire=1700000000"
+	if h["subscription-userinfo"] != want {
+		t.Fatalf("userinfo %q", h["subscription-userinfo"])
+	}
+}
+
 func TestTTLink(t *testing.T) {
 	got, err := Render(User{Status: "active"}, []NodeLine{{
 		Name:   "Titan",

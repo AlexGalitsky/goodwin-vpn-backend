@@ -138,7 +138,7 @@ plan.md
 
 ### API v1
 
-Admin: `/v1/auth/login`, `/v1/groups`, `/v1/users`, `/v1/users/:id/revoke`, `/v1/nodes`, `…/enroll`, `…/stack`, `…/groups`, `…/apply`, `…/health`, `…/exec`, preview тела.
+Admin: `/v1/auth/login`, `/v1/groups`, `/v1/users`, `/v1/users/:id/revoke`, `/v1/audit`, `/v1/nodes`, `…/enroll`, `…/stack`, `…/groups`, `…/apply`, `…/health`, `…/exec`, preview тела.
 
 Публично: `GET /sub/{token}`.
 
@@ -162,8 +162,8 @@ Login; Nodes; enroll; stack+Apply log; **exec на ноде (dev)**; Groups; Use
 | **P3** | Users + Groups + URL | Refresh в Servers подтягивает имя/disable; `https://…/sub/{token}` |
 | **P4** | Две ноды, разные группы | **готово** — разные ссылки; мёртвый agent пропадает из `/sub` |
 | **P5** | Hy2 на 443/udp рядом с REALITY | **готово** — Connect hy2, SNI = SAN |
-| **P6** | TT на 8443, deeplink из endpoint | **в коде** — Apply ставит официальный endpoint, `/sub` отдаёт `tt://?` |
-| **P7** | Квоты, expire, revoke, аудит Apply | userinfo + 404/пусто после revoke |
+| **P6** | TT на 8443, deeplink из endpoint | **готово** — Apply ставит официальный endpoint, `/sub` отдаёт `tt://?` |
+| **P7** | Квоты, expire, revoke, аудит Apply | **готово** — userinfo + пустое 200 / 404 после revoke |
 
 Не начинать Hy2/TT, пока P2–P3 не коннектятся с телефона по подписке.
 
@@ -176,6 +176,8 @@ Login; Nodes; enroll; stack+Apply log; **exec на ноде (dev)**; Groups; Use
 **P4 в коде:** нода без группы не Apply на всех; `/sub` живым health (2 с), `offline` не попадает в тело. Админка: Save groups + Health.
 
 **P3 в коде:** `PUBLIC_SUB_BASE=https://…`; Users — HTTPS URL + `goodwin://import?url=`; disable → `/sub` 200 с пустым телом (Refresh снимает ноды); plane отдаёт `admin/dist`. Панель на второй VPS: `bootstrap_vpn_plane.sh`.
+
+**P7 в коде:** `subscription-userinfo` с expire; группа задаёт квоту и срок по умолчанию; disable / expire / over-quota → 200 пустое тело (ноды снимаются Refresh). Revoke ротирует `sub_token` → старый URL **404**, Apply нод группы выкидывает UUID из Xray. Аудит Apply — JSON (families, counts) на вкладке Exec.
 
 ---
 
