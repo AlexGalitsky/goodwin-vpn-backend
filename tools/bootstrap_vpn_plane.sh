@@ -56,7 +56,12 @@ fi
 
 if ! command -v docker >/dev/null 2>&1; then
   apt-get install -y docker.io
-  systemctl enable --now docker
+fi
+systemctl enable --now docker >/dev/null 2>&1 || true
+
+# Debian docker.io has no Compose v2 plugin. Need docker-compose (v1) or the plugin.
+if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+  apt-get install -y docker-compose docker-compose-v2 docker-compose-plugin 2>/dev/null || apt-get install -y docker-compose || true
 fi
 
 if ! command -v caddy >/dev/null 2>&1; then

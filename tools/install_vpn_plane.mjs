@@ -29,17 +29,72 @@ function arg(name, fallback = "") {
 }
 
 function sh(cmd, args, opts = {}) {
+  const env = {
+    ...process.env,
+    HOME: process.env.HOME || "/root",
+    PATH: `${process.env.PATH || ""}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`,
+    ...opts.env,
+  };
   const r = spawnSync(cmd, args, {
     encoding: "utf8",
     stdio: opts.stdio ?? "pipe",
-    env: { ...process.env, HOME: process.env.HOME || "/root", ...opts.env },
+    env,
     cwd: opts.cwd,
   });
   if (r.status !== 0) {
-    const err = (r.stderr || r.stdout || "").trim() || `${cmd} exit ${r.status}`;
-    throw new Error(err);
+    const why = r.error?.message || r.stderr || r.stdout || "";
+    throw new Error(`${cmd} ${args.join(" ")}: ${String(why).trim() || `exit ${r.status}`}`);
   }
   return r.stdout || "";
+}
+
+function ok(cmd, args) {
+  const r = spawnSync(cmd, args, {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${process.env.PATH || ""}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`,
+    },
+  });
+  return r.status === 0;
+}
+
+function aptInstall(pkgs) {
+  spawnSync("apt-get", ["update", "-y"], {
+    encoding: "utf8",
+    stdio: "inherit",
+    env: { ...process.env, DEBIAN_FRONTEND: "noninteractive" },
+  });
+  for (const pkg of pkgs) {
+    spawnSync("apt-get", ["install", "-y", pkg], {
+      encoding: "utf8",
+      stdio: "inherit",
+      env: { ...process.env, DEBIAN_FRONTEND: "noninteractive" },
+    });
+  }
+}
+
+function ensureDockerCompose() {
+  if (!ok("docker", ["info"])) {
+    aptInstall(["docker.io"]);
+    spawnSync("systemctl", ["enable", "--now", "docker"], { stdio: "inherit" });
+    for (let i = 0; i < 15; i++) {
+      if (ok("docker", ["info"])) break;
+      spawnSync("sleep", ["1"]);
+    }
+  }
+  if (ok("docker", ["compose", "version"])) return ["docker", "compose"];
+  if (ok("docker-compose", ["version"])) return ["docker-compose"];
+  aptInstall(["docker-compose", "docker-compose-v2", "docker-compose-plugin"]);
+  if (ok("docker", ["compose", "version"])) return ["docker", "compose"];
+  if (ok("docker-compose", ["version"])) return ["docker-compose"];
+
+  const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const url = `https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-${arch}`;
+  sh("curl", ["-fsSL", "-o", "/usr/local/bin/docker-compose", url], { stdio: "inherit" });
+  chmodSync("/usr/local/bin/docker-compose", 0o755);
+  if (ok("docker-compose", ["version"])) return ["docker-compose"];
+  throw new Error("docker compose is not installed (tried apt and GitHub release)");
 }
 
 function parseEnvFile(p) {
@@ -58,10 +113,6 @@ function parseEnvFile(p) {
 const src = path.resolve(arg("--src", process.env.PLANE_SRC || defaultSrc));
 const prefix = "/opt/goodwin-vpn-plane";
 const envPath = "/etc/goodwin-vpn-plane.env";
-const certDomain = process.env.CERT_DOMAIN || "";
-const publicBase =
-  process.env.PUBLIC_SUB_BASE ||
-  (certDomain ? `https://${certDomain}` : "http://127.0.0.1:8080");
 
 if (typeof process.getuid === "function" && process.getuid() !== 0) {
   console.error("run as root");
@@ -72,6 +123,18 @@ mkdirSync(prefix, { recursive: true });
 mkdirSync(path.join(prefix, "admin"), { recursive: true });
 
 const prev = parseEnvFile(envPath);
+let certDomain = process.env.CERT_DOMAIN || "";
+if (!certDomain && prev.PUBLIC_SUB_BASE?.startsWith("https://")) {
+  try {
+    certDomain = new URL(prev.PUBLIC_SUB_BASE).hostname;
+  } catch {
+    certDomain = "";
+  }
+}
+const publicBase =
+  process.env.PUBLIC_SUB_BASE ||
+  prev.PUBLIC_SUB_BASE ||
+  (certDomain ? `https://${certDomain}` : "http://127.0.0.1:8080");
 const adminPassword =
   process.env.ADMIN_PASSWORD || prev.ADMIN_PASSWORD || randomBytes(12).toString("hex");
 const sessionSecret =
@@ -101,12 +164,9 @@ writeFileSync(path.join(prefix, "compose.override.yml"), composeOverride);
 copyFileSync(path.join(src, "docker-compose.yml"), path.join(prefix, "docker-compose.yml"));
 
 function dockerCompose(args) {
+  const exe = ensureDockerCompose();
   const base = ["-f", path.join(prefix, "docker-compose.yml"), "-f", path.join(prefix, "compose.override.yml")];
-  try {
-    return sh("docker", ["compose", ...base, ...args], { stdio: "inherit" });
-  } catch {
-    return sh("docker-compose", [...base, ...args], { stdio: "inherit" });
-  }
+  return sh(exe[0], [...exe.slice(1), ...base, ...args], { stdio: "inherit" });
 }
 
 dockerCompose(["up", "-d", "db"]);
