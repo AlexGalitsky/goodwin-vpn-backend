@@ -71,6 +71,7 @@ const cfg = {
   allow_exec: allowExec,
 };
 writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
+chmodSync(cfgPath, 0o600);
 
 if (uid === 0 && process.platform === "linux") {
   spawnSync("systemctl", ["stop", "goodwin-vpn-agent"], { encoding: "utf8" });

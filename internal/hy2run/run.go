@@ -95,6 +95,22 @@ WantedBy=multi-user.target
 	return nil
 }
 
+func StopUnit() error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	cmd := exec.Command("systemctl", "disable", "--now", "goodwin-hysteria")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.ToLower(string(out) + " " + err.Error())
+		if strings.Contains(msg, "not found") || strings.Contains(msg, "not loaded") || strings.Contains(msg, "could not be found") {
+			return nil
+		}
+		return fmt.Errorf("systemctl disable goodwin-hysteria: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func Listening(port int) bool {
 	if runtime.GOOS == "linux" && exec.Command("systemctl", "is-active", "--quiet", "goodwin-hysteria").Run() == nil {
 		return true

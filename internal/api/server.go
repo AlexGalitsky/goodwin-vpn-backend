@@ -53,7 +53,7 @@ func New(st *store.Store, cfg Config) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return cors(s.mux)
+	return s.cors(s.mux)
 }
 
 func (s *Server) routes() {
@@ -88,16 +88,36 @@ func (s *Server) routes() {
 	}
 }
 
-func cors(next http.Handler) http.Handler {
+func corsOrigins(publicSubBase string) map[string]struct{} {
+	out := map[string]struct{}{
+		"http://127.0.0.1:5173": {},
+		"http://localhost:5173": {},
+	}
+	base := strings.TrimRight(strings.TrimSpace(publicSubBase), "/")
+	if base == "" {
+		return out
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return out
+	}
+	out[u.Scheme+"://"+u.Host] = struct{}{}
+	return out
+}
+
+func (s *Server) cors(next http.Handler) http.Handler {
+	allowed := corsOrigins(s.cfg.PublicSubBase)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
+		if origin != "" {
+			if _, ok := allowed[origin]; ok {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				w.Header().Set("Vary", "Origin")
+			}
 		}
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -646,7 +666,11 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.store.Audit(r.Context(), "admin", "user_patch", &id, u.Status)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": u})
+	out := map[string]any{"ok": true, "user": u}
+	if req.Status != nil || req.Upload != nil || req.Download != nil || req.Total != nil || req.ExpireUnix != nil || req.ExtendHours != nil {
+		out["applied_nodes"] = s.applyGroupNodes(r.Context(), u.GroupID)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) revokeUser(w http.ResponseWriter, r *http.Request) {
@@ -1142,7 +1166,7 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 	}
 
 	st := desired.State{}
-	if wantVLESS && (len(clients) > 0 || allowEmpty) {
+	if wantVLESS {
 		keys, err := s.ensureReality(ctx)
 		if err != nil {
 			return nil, http.StatusInternalServerError, err
@@ -1159,7 +1183,7 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 			Clients:     clients,
 		}
 	}
-	if wantHy2 && len(hy2Users) > 0 {
+	if wantHy2 {
 		hport := ports.Hy2UDP
 		if hport <= 0 {
 			hport = 443
@@ -1170,7 +1194,7 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 			Users:    hy2Users,
 		}
 	}
-	if wantTT && len(ttUsers) > 0 {
+	if wantTT {
 		tport := ports.TT
 		if tport <= 0 {
 			tport = 8443
@@ -1188,7 +1212,7 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 		}
 	}
 	if st.VLESS == nil && st.Hy2 == nil && st.TT == nil {
-		return nil, http.StatusBadRequest, errors.New("no vless/hy2/tt users in this node's groups — create a user, then Apply again")
+		return nil, http.StatusBadRequest, errors.New("node has no protocol families")
 	}
 
 	res, err := c.Apply(ctx, st)
@@ -1209,12 +1233,12 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 	}
 	n.AppliedFamilies = fams
 	switch {
-	case len(fams) == 0:
+	case !res.OK && len(fams) == 0:
 		n.Status = "failed"
-	case res.OK:
-		n.Status = "ready"
-	default:
+	case !res.OK:
 		n.Status = "degraded"
+	default:
+		n.Status = "ready"
 	}
 	if err := s.store.UpdateNode(ctx, n); err != nil {
 		return nil, http.StatusInternalServerError, err
@@ -1229,7 +1253,7 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 			links[id] = l.Link
 		}
 		_ = s.store.ReplaceTTLinks(ctx, n.ID, links)
-	} else if !wantTT {
+	} else {
 		_ = s.store.DeleteTTLinksForNode(ctx, n.ID)
 	}
 	detail, _ := json.Marshal(map[string]any{

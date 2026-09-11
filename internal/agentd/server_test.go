@@ -116,3 +116,69 @@ func TestHealthAndExec(t *testing.T) {
 		t.Fatalf("tt body %s", raw)
 	}
 }
+
+func TestEmptyHy2AndTTStopWithoutCert(t *testing.T) {
+	dir := t.TempDir()
+	s := New(Config{Token: "secret", Prefix: dir, Version: "test"})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	put := func(body []byte) (int, []byte) {
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/v1/desired", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set("Content-Type", "application/json")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		return res.StatusCode, raw
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"hy2": map[string]any{
+			"port":     443,
+			"hostname": "no-such.example",
+			"users":    []any{},
+		},
+	})
+	code, raw := put(body)
+	if code != 200 {
+		t.Fatalf("empty hy2 status %d body %s", code, raw)
+	}
+	var hy2Out struct {
+		OK        bool   `json:"ok"`
+		Hy2Listen bool   `json:"hy2_listen"`
+		Detail    string `json:"detail"`
+	}
+	if err := json.Unmarshal(raw, &hy2Out); err != nil {
+		t.Fatal(err)
+	}
+	if !hy2Out.OK || hy2Out.Hy2Listen || !bytes.Contains([]byte(hy2Out.Detail), []byte("no users")) {
+		t.Fatalf("empty hy2 %+v", hy2Out)
+	}
+
+	body, _ = json.Marshal(map[string]any{
+		"tt": map[string]any{
+			"port":     8443,
+			"hostname": "no-such.example",
+			"users":    []any{},
+		},
+	})
+	code, raw = put(body)
+	if code != 200 {
+		t.Fatalf("empty tt status %d body %s", code, raw)
+	}
+	var ttOut struct {
+		OK       bool   `json:"ok"`
+		TTListen bool   `json:"tt_listen"`
+		Detail   string `json:"detail"`
+	}
+	if err := json.Unmarshal(raw, &ttOut); err != nil {
+		t.Fatal(err)
+	}
+	if !ttOut.OK || ttOut.TTListen || !bytes.Contains([]byte(ttOut.Detail), []byte("no users")) {
+		t.Fatalf("empty tt %+v", ttOut)
+	}
+}
