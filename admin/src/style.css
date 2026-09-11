@@ -36,5 +36,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
 nav button { border: 0; background: transparent; color: #9aa0a6; }
 nav button.on { color: #e8eaed; font-weight: 600; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #3c4043; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #3c4043; vertical-align: top; }
+select[multiple] { min-height: 4.5em; min-width: 10em; }
 .err { color: #f28b82; }

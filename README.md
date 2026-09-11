@@ -51,6 +51,26 @@ scp bin/agent tools/install_vpn_node.mjs root@VPS:/tmp/
 sudo node /tmp/install_vpn_node.mjs --bin /tmp/agent
 ```
 
-Copy IPv4 + token into admin → New node. Then **Exec** on the node card (`uname -a`, `ss -lntp`).
+Copy IPv4 + token into admin → New node (pick **one** group). Then **Exec** on the node card (`uname -a`, `ss -lntp`). Apply.
+
+## Two nodes (P4)
+
+1. Update the panel so `/sub` skips dead agents:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_plane.sh | sudo env CERT_DOMAIN=saturn.goodwin.website bash
+```
+
+2. Groups: two groups (one per region / VPS).
+3. Titan: Save groups → **only** the first group, then Apply. (An older Apply used to attach every group.)
+4. Second VPS — **node** installer, not the panel:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=YOUR_HOSTNAME bash
+```
+
+5. Enroll with the **other** group, create a user in that group, Apply.
+6. Users → Preview: the two users must get different `vless://` hosts.
+7. Dead node: `systemctl stop goodwin-vpn-agent` on one VPS, Refresh the subscription — that host’s line is gone. Start the agent again and it returns.
 
 `allow_exec` is on by default for development. Turn off with `--no-exec` before giving the panel to anyone else.

@@ -6,6 +6,7 @@ type UserRow = {
   DisplayName: string;
   SubToken: string;
   Status: string;
+  GroupID: string;
   sub_url: string;
   import_url: string;
 };
@@ -222,39 +223,99 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
       </form>
       <div className="card">
         <h2>Nodes</h2>
+        <p className="muted">
+          One group per region: each user only sees nodes saved on their group. Apply never
+          attaches every group. After Save groups, click Apply. Health / dead agent →{" "}
+          <code>offline</code>, that node disappears from <code>/sub</code> until it answers again.
+        </p>
         <table>
           <thead>
             <tr>
               <th>Name</th>
               <th>IP</th>
               <th>Status</th>
-              <th>Families</th>
+              <th>Groups</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
             {nodes.map((n) => (
               <tr key={n.ID}>
-                <td>{n.Name}</td>
+                <td>
+                  {n.Name}
+                  <div className="muted">{n.Hostname || "—"}</div>
+                </td>
                 <td>{n.IPv4 || "—"}</td>
                 <td>{n.Status}</td>
-                <td>{(n.Families || []).join(", ")}</td>
                 <td>
-                  <button
-                    type="button"
-                    disabled={n.Status === "pending"}
-                    onClick={async () => {
-                      onError("");
-                      try {
-                        await api(`/v1/nodes/${n.ID}/apply`, { method: "POST", body: "{}" });
-                        await load();
-                      } catch (e) {
-                        onError(e instanceof Error ? e.message : "apply");
-                      }
+                  <select
+                    multiple
+                    value={n.group_ids || []}
+                    onChange={(e) => {
+                      const ids = Array.from(e.target.selectedOptions).map((o) => o.value);
+                      setNodes((prev) =>
+                        prev.map((x) => (x.ID === n.ID ? { ...x, group_ids: ids } : x)),
+                      );
                     }}
                   >
-                    Apply
-                  </button>
+                    {groups.map((g) => (
+                      <option key={g.ID} value={g.ID}>
+                        {g.Name}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td>
+                  <div className="row">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        onError("");
+                        try {
+                          await api(`/v1/nodes/${n.ID}/groups`, {
+                            method: "PUT",
+                            body: JSON.stringify({ group_ids: n.group_ids || [] }),
+                          });
+                          await load();
+                        } catch (e) {
+                          onError(e instanceof Error ? e.message : "groups");
+                        }
+                      }}
+                    >
+                      Save groups
+                    </button>
+                    <button
+                      type="button"
+                      disabled={n.Status === "pending"}
+                      onClick={async () => {
+                        onError("");
+                        try {
+                          await api(`/v1/nodes/${n.ID}/apply`, { method: "POST", body: "{}" });
+                          await load();
+                        } catch (e) {
+                          onError(e instanceof Error ? e.message : "apply");
+                        }
+                      }}
+                    >
+                      Apply
+                    </button>
+                    <button
+                      type="button"
+                      disabled={n.Status === "pending"}
+                      onClick={async () => {
+                        onError("");
+                        try {
+                          await api(`/v1/nodes/${n.ID}/health`);
+                          await load();
+                        } catch (e) {
+                          onError(e instanceof Error ? e.message : "offline");
+                          await load();
+                        }
+                      }}
+                    >
+                      Health
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -334,7 +395,12 @@ function Users({ onError }: { onError: (s: string) => void }) {
           <div key={u.ID} style={{ marginBottom: 16 }}>
             <div>
               <strong>{u.DisplayName || u.ID}</strong>{" "}
-              <span className="muted">{u.Status}</span>
+              <span className="muted">
+                {u.Status}
+                {groups.find((g) => g.ID === u.GroupID)
+                  ? ` · ${groups.find((g) => g.ID === u.GroupID)?.Name}`
+                  : ""}
+              </span>
             </div>
             <div className="muted">{u.sub_url}</div>
             <div className="row" style={{ marginTop: 8 }}>

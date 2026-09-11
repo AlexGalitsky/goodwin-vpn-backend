@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -555,12 +556,16 @@ func (s *Server) nodeHealth(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	h, err := c.Health(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	h, err := c.Health(ctx)
 	if err != nil {
+		s.noteNodeAlive(r.Context(), &n, false)
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"node_id": n.ID, "health": h})
+	s.noteNodeAlive(r.Context(), &n, h.OK)
+	writeJSON(w, http.StatusOK, map[string]any{"node_id": n.ID, "health": h, "node_status": n.Status})
 }
 
 func (s *Server) nodeExec(w http.ResponseWriter, r *http.Request) {
@@ -615,18 +620,8 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(gids) == 0 {
-		gs, err := s.store.ListGroups(r.Context())
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		for _, g := range gs {
-			gids = append(gids, g.ID)
-		}
-		if err := s.store.SetNodeGroups(r.Context(), n.ID, gids); err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+		writeErr(w, http.StatusBadRequest, "assign this node to a group before Apply")
+		return
 	}
 	seen := map[string]bool{}
 	for _, gid := range gids {
@@ -845,13 +840,30 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 	if err != nil {
 		return "", sub.Headers{}, http.StatusInternalServerError, err
 	}
+	type probed struct {
+		n     store.Node
+		alive bool
+	}
+	probes := make([]probed, len(nodeIDs))
+	var wg sync.WaitGroup
+	for i, nid := range nodeIDs {
+		wg.Add(1)
+		go func(i int, nid uuid.UUID) {
+			defer wg.Done()
+			n, err := s.store.Node(ctx, nid)
+			if err != nil {
+				return
+			}
+			alive := s.agentAlive(ctx, n)
+			s.noteNodeAlive(ctx, &n, alive)
+			probes[i] = probed{n: n, alive: alive}
+		}(i, nid)
+	}
+	wg.Wait()
 	var lines []sub.NodeLine
-	for _, nid := range nodeIDs {
-		n, err := s.store.Node(ctx, nid)
-		if err != nil {
-			continue
-		}
-		if n.Status != "ready" {
+	for _, p := range probes {
+		n := p.n
+		if n.ID == uuid.Nil || !sub.IncludeNode(n.Status, n.AppliedFamilies, p.alive) {
 			continue
 		}
 		host := n.Hostname
@@ -914,6 +926,33 @@ func (s *Server) subURL(token string) string {
 		base = "http://127.0.0.1:8080"
 	}
 	return base + "/sub/" + token
+}
+
+func (s *Server) agentAlive(ctx context.Context, n store.Node) bool {
+	if strings.TrimSpace(n.IPv4) == "" || strings.TrimSpace(n.AgentToken) == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	c := agentclient.New(fmt.Sprintf("http://%s:%d", n.IPv4, n.ControlPort), n.AgentToken)
+	h, err := c.Health(ctx)
+	return err == nil && h.OK
+}
+
+func (s *Server) noteNodeAlive(ctx context.Context, n *store.Node, alive bool) {
+	next := n.Status
+	if !alive {
+		if n.Status == "ready" || n.Status == "degraded" {
+			next = "offline"
+		}
+	} else if n.Status == "offline" {
+		next = "ready"
+	}
+	if next == n.Status {
+		return
+	}
+	n.Status = next
+	_ = s.store.UpdateNode(ctx, *n)
 }
 
 func randomToken(n int) (string, error) {
