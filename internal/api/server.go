@@ -581,6 +581,10 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	if len(clients) == 0 {
+		writeErr(w, http.StatusBadRequest, "no vless users in this node's groups — create a user, then Apply again")
+		return
+	}
 	st := desired.State{VLESS: &desired.VLESS{
 		Port:    port,
 		Reality: keys,

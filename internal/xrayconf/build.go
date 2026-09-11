@@ -21,6 +21,10 @@ func Build(v desired.VLESS) ([]byte, error) {
 	}
 	cfg := map[string]any{
 		"log": map[string]any{"loglevel": "warning"},
+		"dns": map[string]any{
+			"servers":       []string{"1.1.1.1", "8.8.8.8"},
+			"queryStrategy": "UseIPv4",
+		},
 		"inbounds": []any{
 			map[string]any{
 				"tag":      "vless-reality",
@@ -37,6 +41,7 @@ func Build(v desired.VLESS) ([]byte, error) {
 					"realitySettings": map[string]any{
 						"show":        false,
 						"dest":        v.Reality.Dest,
+						"target":      v.Reality.Dest,
 						"xver":        0,
 						"serverNames": []string{v.Reality.SNI},
 						"privateKey":  v.Reality.PrivateKey,
@@ -45,12 +50,17 @@ func Build(v desired.VLESS) ([]byte, error) {
 				},
 				"sniffing": map[string]any{
 					"enabled":      true,
-					"destOverride": []string{"http", "tls", "quic"},
+					"destOverride": []string{"http", "tls"},
+					"routeOnly":    true,
 				},
 			},
 		},
 		"outbounds": []any{
-			map[string]any{"protocol": "freedom", "tag": "direct"},
+			map[string]any{
+				"protocol": "freedom",
+				"tag":      "direct",
+				"settings": map[string]any{"domainStrategy": "UseIPv4"},
+			},
 			map[string]any{"protocol": "blackhole", "tag": "block"},
 		},
 	}

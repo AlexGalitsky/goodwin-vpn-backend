@@ -31,4 +31,14 @@ func TestBuild(t *testing.T) {
 	if len(inbounds) != 1 {
 		t.Fatalf("inbounds %d", len(inbounds))
 	}
+	in := inbounds[0].(map[string]any)
+	sniff := in["sniffing"].(map[string]any)
+	if sniff["routeOnly"] != true {
+		t.Fatalf("sniffing %+v", sniff)
+	}
+	outs := m["outbounds"].([]any)
+	direct := outs[0].(map[string]any)
+	if direct["settings"].(map[string]any)["domainStrategy"] != "UseIPv4" {
+		t.Fatalf("outbound %+v", direct)
+	}
 }
