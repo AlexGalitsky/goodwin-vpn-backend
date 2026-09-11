@@ -30,6 +30,7 @@ func main() {
 		AdminPassword: getenv("ADMIN_PASSWORD", "change-me"),
 		SessionSecret: getenv("SESSION_SECRET", "dev-session-secret-change-me"),
 		PublicSubBase: getenv("PUBLIC_SUB_BASE", "http://127.0.0.1:8080"),
+		AdminDir:      getenv("ADMIN_DIR", ""),
 	})
 	addr := api.ParseListen(getenv("LISTEN", ":8080"))
 	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}

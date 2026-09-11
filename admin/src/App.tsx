@@ -7,6 +7,7 @@ type UserRow = {
   SubToken: string;
   Status: string;
   sub_url: string;
+  import_url: string;
 };
 type NodeRow = {
   ID: string;
@@ -269,7 +270,7 @@ function Users({ onError }: { onError: (s: string) => void }) {
   const [groups, setGroups] = useState<Group[]>([]);
   const [name, setName] = useState("");
   const [groupId, setGroupId] = useState("");
-  const [preview, setPreview] = useState("");
+  const [preview, setPreview] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -323,29 +324,66 @@ function Users({ onError }: { onError: (s: string) => void }) {
       </form>
       <div className="card">
         <h2>Users</h2>
+        {!users[0]?.sub_url.startsWith("https://") ? (
+          <p className="err">
+            PUBLIC_SUB_BASE is not HTTPS. The app rejects http:// subscription URLs. Set it to
+            https://your-panel-host before handing out links.
+          </p>
+        ) : null}
         {users.map((u) => (
-          <div key={u.ID} style={{ marginBottom: 12 }}>
+          <div key={u.ID} style={{ marginBottom: 16 }}>
             <div>
               <strong>{u.DisplayName || u.ID}</strong>{" "}
               <span className="muted">{u.Status}</span>
             </div>
             <div className="muted">{u.sub_url}</div>
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  const p = await api<{ body: string }>(`/v1/users/${u.ID}/preview`);
-                  setPreview(p.body);
-                } catch (e) {
-                  onError(e instanceof Error ? e.message : "preview");
-                }
-              }}
-            >
-              Preview body
-            </button>
+            <div className="row" style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                onClick={() => void navigator.clipboard.writeText(u.sub_url)}
+              >
+                Copy HTTPS URL
+              </button>
+              <button
+                type="button"
+                onClick={() => void navigator.clipboard.writeText(u.import_url)}
+              >
+                Copy goodwin://import
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const next = u.Status === "disabled" ? "active" : "disabled";
+                    await api(`/v1/users/${u.ID}`, {
+                      method: "PATCH",
+                      body: JSON.stringify({ status: next }),
+                    });
+                    await load();
+                  } catch (e) {
+                    onError(e instanceof Error ? e.message : "status");
+                  }
+                }}
+              >
+                {u.Status === "disabled" ? "Enable" : "Disable"}
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const p = await api<{ body: string }>(`/v1/users/${u.ID}/preview`);
+                    setPreview(p.body);
+                  } catch (e) {
+                    onError(e instanceof Error ? e.message : "preview");
+                  }
+                }}
+              >
+                Preview body
+              </button>
+            </div>
           </div>
         ))}
-        {preview ? <pre>{preview}</pre> : null}
+        {preview !== null ? <pre>{preview || "(empty — disabled or no ready nodes)"}</pre> : null}
       </div>
     </div>
   );

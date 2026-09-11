@@ -105,14 +105,14 @@ type User struct {
 }
 
 type Node struct {
-	ID          uuid.UUID
-	Name        string
-	IPv4        string
-	IPv6        string
-	Hostname    string
-	ControlPort int
+	ID              uuid.UUID
+	Name            string
+	IPv4            string
+	IPv6            string
+	Hostname        string
+	ControlPort     int
 	Families        []string
-	AppliedFamilies []string `json:"applied_families"`
+	AppliedFamilies []string        `json:"applied_families"`
 	PortsJSON       json.RawMessage `json:"ports"`
 	Status          string
 	AgentToken      string `json:"-"`
@@ -193,6 +193,17 @@ func (s *Store) UserBySubToken(ctx context.Context, token string) (User, error) 
 		return User{}, ErrNotFound
 	}
 	return u, err
+}
+
+func (s *Store) SetUserStatus(ctx context.Context, id uuid.UUID, status string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE users SET status=$2 WHERE id=$1`, id, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) CreateNode(ctx context.Context, n Node) (Node, error) {

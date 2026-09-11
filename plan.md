@@ -28,9 +28,10 @@
 | API `cmd/plane` | Go, Postgres 16, `pgx`, goose-миграции |
 | Agent `cmd/agent` | тот же Go-модуль, static binary, systemd |
 | Admin `admin/` | Vite + React + TypeScript |
-| Инсталлятор | `tools/bootstrap_vpn_node.sh` (ставит Node) → `node tools/install_vpn_node.mjs` |
+| Инсталлятор ноды | `tools/bootstrap_vpn_node.sh` (ставит Node) → `node tools/install_vpn_node.mjs` |
+| Инсталлятор панели | `tools/bootstrap_vpn_plane.sh` → `node tools/install_vpn_plane.mjs` (plane + admin + Postgres + Caddy). **Идемпотентный:** повторный запуск = `git pull`, сборка, restart. Не ставить на exit-ноду. |
 | Ядра на ноде | официальные релизы: Xray-core, hysteria, `trusttunnel_endpoint` |
-| TLS панели | Caddy: отдельно админка и публичный `/sub` |
+| TLS панели | Caddy на **отдельном** VPS: админка и публичный `/sub` |
 
 Один модуль, общие типы `DesiredState`. Redis / k8s / Nest — не в v1.
 
@@ -74,7 +75,7 @@
 - Тело: по одной share-ссылке на строку (или Base64 этого текста).
 - Схемы: `vless`, `vmess`, `trojan`, `hysteria2`, `hy2`, `tt`.
 - Заголовки: `profile-title`, `profile-update-interval`, `subscription-userinfo` (`upload; download; total; expire`).
-- VLESS: `type` только tcp/ws/grpc; REALITY — `pbk`, `sid`, `sni`, `fp`, `flow=xtls-rprx-vision`.
+- VLESS: `type` только tcp/ws/grpc; REALITY — `pbk`, `sid`, `sni`, `fp`. Рабочий P2: **grpc + Cloudflare**, без `flow`. Vision (`xtls-rprx-vision` + tcp) в `app/` поднимает TUN, но трафик не шёл.
 - Hy2: пароль + `sni` = SAN сертификата, без obfs.
 - TT: `tt://?` TLV v1 с официального `trusttunnel_endpoint -c … --format deeplink`.
 
@@ -84,8 +85,9 @@
 
 ## Админ-поток
 
+0. **Панель (отдельный VPS, не titan):** `bootstrap_vpn_plane.sh` с `CERT_DOMAIN` (например saturn). Повторный запуск обновляет plane и admin из git и перезапускает сервисы.
 1. VPS с IP, отдельным от панели.
-2. Скрипт ставит пустой agent: порт **19400**, одноразовый токен, печать IP. Без inbound до Apply.
+2. Скрипт ноды ставит пустой agent: порт **19400**, одноразовый токен, печать IP. Без inbound до Apply.
 3. Админка → New node: имя, IP, порт, токен, hostname (если Hy2/TT), пресет, группы.
 4. Конфликт портов или Hy2/TT без hostname → Save нельзя.
 5. Enroll: панель → `http(s)://IP:19400` с токеном → health. Позже mTLS, токен сгорает.
@@ -126,7 +128,10 @@ cmd/plane/          # API
 cmd/agent/          # нода
 internal/           # store, sub renderer, HTTP
 admin/              # Vite React
+tools/bootstrap_vpn_node.sh
 tools/install_vpn_node.mjs
+tools/bootstrap_vpn_plane.sh
+tools/install_vpn_plane.mjs
 testdata/subscriptions/
 plan.md
 ```
@@ -153,8 +158,8 @@ Login; Nodes; enroll; stack+Apply log; **exec на ноде (dev)**; Groups; Use
 |------|------|----------------|
 | **P0** | Каркас + золотые тела | `parseSubscriptionDocument` принимает `/sub/{token}` |
 | **P1** | Agent enroll + exec | Токен из инсталлятора, health и команда с админки на VPS |
-| **P2** | VLESS REALITY на одной VM | Connect в `app/` с preview-ссылки, IP = нода |
-| **P3** | Users + Groups + URL | Refresh в Servers подтягивает имя/disable |
+| **P2** | VLESS REALITY на одной VM | **готово** — grpc REALITY, dest Cloudflare, Connect с preview, IP = titan |
+| **P3** | Users + Groups + URL | Refresh в Servers подтягивает имя/disable; `https://…/sub/{token}` |
 | **P4** | Две ноды, разные группы | Разные наборы ссылок; мёртвая нода не в теле |
 | **P5** | Hy2 на 443/udp рядом с REALITY | Connect hy2, SNI = SAN |
 | **P6** | TT на 8443, deeplink из endpoint | Три строки в одной подписке, форма ловит конфликт 443 |
@@ -162,7 +167,9 @@ Login; Nodes; enroll; stack+Apply log; **exec на ноде (dev)**; Groups; Use
 
 Не начинать Hy2/TT, пока P2–P3 не коннектятся с телефона по подписке.
 
-**P2 в коде:** `POST /v1/nodes/:id/apply` ставит Xray VLESS+REALITY на 443. Админка — кнопка Apply. Ключи plane-wide (`www.microsoft.com` dest). Ссылки в preview только после `ready`.
+**P2 в коде:** Apply ставит Xray VLESS+REALITY **gRPC** на 443, dest/SNI `www.cloudflare.com`. Preview только после `ready`.
+
+**P3 в коде:** `PUBLIC_SUB_BASE=https://…`; Users — HTTPS URL + `goodwin://import?url=`; disable → `/sub` 200 с пустым телом (Refresh снимает ноды); plane отдаёт `admin/dist`. Панель на второй VPS: `bootstrap_vpn_plane.sh`.
 
 ---
 

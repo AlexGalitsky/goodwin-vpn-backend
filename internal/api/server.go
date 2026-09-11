@@ -13,6 +13,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +36,7 @@ type Config struct {
 	AdminPassword string
 	SessionSecret string
 	PublicSubBase string
+	AdminDir      string
 }
 
 type Server struct {
@@ -58,6 +63,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/groups", s.withAuth(s.createGroup))
 	s.mux.HandleFunc("GET /v1/users", s.withAuth(s.listUsers))
 	s.mux.HandleFunc("POST /v1/users", s.withAuth(s.createUser))
+	s.mux.HandleFunc("PATCH /v1/users/{id}", s.withAuth(s.patchUser))
 	s.mux.HandleFunc("GET /v1/nodes", s.withAuth(s.listNodes))
 	s.mux.HandleFunc("POST /v1/nodes", s.withAuth(s.createNode))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/enroll", s.withAuth(s.enrollNode))
@@ -68,6 +74,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/nodes/{id}/apply", s.withAuth(s.applyNode))
 	s.mux.HandleFunc("GET /v1/users/{id}/preview", s.withAuth(s.previewUser))
 	s.mux.HandleFunc("GET /sub/{token}", s.subscription)
+	if strings.TrimSpace(s.cfg.AdminDir) != "" {
+		s.mux.HandleFunc("GET /", s.adminStatic)
+		s.mux.HandleFunc("GET /{path...}", s.adminStatic)
+	}
 }
 
 func cors(next http.Handler) http.Handler {
@@ -79,7 +89,7 @@ func cors(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -116,19 +126,46 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "bad password")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     "plane_session",
-		Value:    s.signSession(),
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   7 * 24 * 3600,
-	})
+	http.SetCookie(w, s.sessionCookie(s.signSession(), 7*24*3600))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+func (s *Server) sessionCookie(value string, maxAge int) *http.Cookie {
+	c := &http.Cookie{
+		Name:     "plane_session",
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge,
+	}
+	if strings.HasPrefix(strings.ToLower(s.cfg.PublicSubBase), "https://") {
+		c.Secure = true
+	}
+	return c
+}
+
+func (s *Server) adminStatic(w http.ResponseWriter, r *http.Request) {
+	root := filepath.Clean(s.cfg.AdminDir)
+	rel := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+	target := filepath.Join(root, rel)
+	if rel == "" || rel == "." {
+		target = filepath.Join(root, "index.html")
+	}
+	if !strings.HasPrefix(target, root) {
+		http.NotFound(w, r)
+		return
+	}
+	st, err := os.Stat(target)
+	if err != nil || st.IsDir() {
+		http.ServeFile(w, r, filepath.Join(root, "index.html"))
+		return
+	}
+	http.ServeFile(w, r, target)
+}
+
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: "plane_session", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, s.sessionCookie("", -1))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -224,11 +261,17 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	type row struct {
 		store.User
-		SubURL string `json:"sub_url"`
+		SubURL    string `json:"sub_url"`
+		ImportURL string `json:"import_url"`
 	}
 	out := make([]row, 0, len(us))
 	for _, u := range us {
-		out = append(out, row{User: u, SubURL: s.subURL(u.SubToken)})
+		sub := s.subURL(u.SubToken)
+		out = append(out, row{
+			User:      u,
+			SubURL:    sub,
+			ImportURL: "goodwin://import?url=" + url.QueryEscape(sub),
+		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -266,7 +309,37 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"user": u, "sub_url": s.subURL(u.SubToken)})
+	writeJSON(w, http.StatusCreated, map[string]any{"user": u, "sub_url": s.subURL(u.SubToken), "import_url": "goodwin://import?url=" + url.QueryEscape(s.subURL(u.SubToken))})
+}
+
+func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "id")
+		return
+	}
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	st := strings.ToLower(strings.TrimSpace(req.Status))
+	if st != "active" && st != "disabled" {
+		writeErr(w, http.StatusBadRequest, "status must be active or disabled")
+		return
+	}
+	if err := s.store.SetUserStatus(r.Context(), id, st); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "user")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.store.Audit(r.Context(), "admin", "user_status", &id, st)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": st})
 }
 
 func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
@@ -735,7 +808,6 @@ func (s *Server) subscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	sub.WriteHeaders(map[string]string{}, hdr)
 	h := map[string]string{}
 	sub.WriteHeaders(h, hdr)
 	for k, v := range h {
@@ -746,8 +818,18 @@ func (s *Server) subscription(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Headers, int, error) {
+	hdr := sub.Headers{
+		Title:         strings.TrimSpace(u.DisplayName),
+		IntervalHours: 24,
+		Upload:        u.Upload,
+		Download:      u.Download,
+		Total:         u.Total,
+	}
+	if hdr.Title == "" {
+		hdr.Title = "Goodwin"
+	}
 	if u.Status != "active" {
-		return "", sub.Headers{}, http.StatusForbidden, errors.New("user disabled")
+		return "", hdr, http.StatusOK, nil
 	}
 	groups, err := s.store.ListGroups(ctx)
 	if err != nil {

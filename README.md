@@ -15,7 +15,17 @@ cd admin && npm install && npm run dev   # :5173
 
 Admin: http://127.0.0.1:5173 password `change-me`.
 
-Dev user after seed: `http://127.0.0.1:8080/sub/dev-sub-token` (404 until a node is enrolled and attached to group `dev`).
+Dev user after seed: `http://127.0.0.1:8080/sub/dev-sub-token` (404 until a node is enrolled and attached to group `dev`). The Flutter app **rejects http://** — for a real import set `PUBLIC_SUB_BASE=https://…`.
+
+## Panel VPS (API + admin, not the exit node)
+
+Debian/Ubuntu, **root**. First install and later updates are the same command (git pull + rebuild + restart):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_plane.sh | sudo env CERT_DOMAIN=saturn.goodwin.website bash
+```
+
+Пароль админки пишется в `/etc/goodwin-vpn-plane.env` и при повторном запуске **не сбрасывается**.
 
 ## Node on a VPS (from GitHub)
 
