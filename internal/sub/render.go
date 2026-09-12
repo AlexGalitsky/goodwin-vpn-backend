@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"website.goodwin.vpn/plane/internal/geo"
 	"website.goodwin.vpn/plane/internal/stack"
 )
 
@@ -191,4 +192,49 @@ func WriteHeaders(dst map[string]string, h Headers) {
 		"upload=%d; download=%d; total=%d; expire=%d",
 		h.Upload, h.Download, h.Total, h.ExpireUnix,
 	)
+}
+
+// PublicHTTPSOrigin is the Goodwin service base from PUBLIC_SUB_BASE.
+// Empty when the value is not https (local http://127.0.0.1:8080).
+func PublicHTTPSOrigin(publicSubBase string) string {
+	u, err := url.Parse(strings.TrimSpace(publicSubBase))
+	if err != nil || u.User != nil {
+		return ""
+	}
+	if !strings.EqualFold(u.Scheme, "https") || strings.TrimSpace(u.Host) == "" {
+		return ""
+	}
+	return "https://" + u.Host
+}
+
+// ServiceHeader is the Goodwin-VPN value advertised on GET /sub/{token}.
+func ServiceHeader(publicSubBase string) string {
+	origin := PublicHTTPSOrigin(publicSubBase)
+	if origin == "" {
+		return ""
+	}
+	return fmt.Sprintf(`v1; base="%s"`, origin)
+}
+
+// ServiceDocument is GET /gw/v1/service. Unknown client features are ignored.
+type ServiceDocument struct {
+	Protocol string   `json:"protocol"`
+	Version  int      `json:"version"`
+	Name     string   `json:"name"`
+	Privacy  string   `json:"privacy,omitempty"`
+	Support  string   `json:"support,omitempty"`
+	Features []string `json:"features"`
+}
+
+func ServiceDocumentFor(publicSubBase string) ServiceDocument {
+	doc := ServiceDocument{
+		Protocol: "goodwin-vpn",
+		Version:  1,
+		Name:     "Goodwin VPN",
+		Features: geo.ServiceFeatures(),
+	}
+	if origin := PublicHTTPSOrigin(publicSubBase); origin != "" {
+		doc.Privacy = origin + "/privacy"
+	}
+	return doc
 }

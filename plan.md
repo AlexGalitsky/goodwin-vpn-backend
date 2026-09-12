@@ -83,6 +83,8 @@
 
 Импорт в приложении: вставка, QR, `goodwin://import?url=`.
 
+Открытый сервис поверх `/sub` (заголовок `Goodwin-VPN`, `serviceBase`, geo-packs): канон в клиенте [`docs/goodwin-protocol.md`](https://github.com/AlexGalitsky/goodwin-vpn-client/blob/main/docs/goodwin-protocol.md). Тело `/sub` и 404≠200 **не менять**. G0: `GET /sub/{token}` ставит `Goodwin-VPN` на https `PUBLIC_SUB_BASE`. G2: публичный `GET /gw/v1/service` (имя, privacy, `features[]`). G3: публичные `GET /gw/v1/geo/manifest` и `GET /gw/v1/geo/packs/ads` (allowlist в `internal/geo/allowlist/`, sha256; `features` содержит `geo-packs`).
+
 ---
 
 ## Админ-поток
@@ -134,6 +136,8 @@ tools/bootstrap_vpn_node.sh
 tools/install_vpn_node.mjs
 tools/bootstrap_vpn_plane.sh
 tools/install_vpn_plane.mjs
+tools/build_geo_packs.mjs
+internal/geo/allowlist/   # G3 ads pack source
 testdata/subscriptions/
 plan.md
 ```
@@ -142,7 +146,7 @@ plan.md
 
 Admin: `/v1/auth/login`, `/v1/overview`, `/v1/groups`, `/v1/users`, `/v1/users/:id/revoke`, `/v1/users/:id/rotate`, `/v1/audit`, `/v1/nodes`, `…/enroll`, `…/stack`, `…/groups`, `…/apply`, `…/health`, `…/exec`, preview тела.
 
-Публично: `GET /sub/{token}`.
+Публично: `GET /sub/{token}`, `GET /privacy`, `GET /gw/v1/service`, `GET /gw/v1/geo/manifest`, `GET /gw/v1/geo/packs/{id}`.
 
 Agent: `/v1/health`, `/v1/exec` (dev), позже `PUT /v1/desired`.
 

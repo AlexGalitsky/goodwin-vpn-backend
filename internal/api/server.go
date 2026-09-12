@@ -27,6 +27,7 @@ import (
 
 	"website.goodwin.vpn/plane/internal/agentclient"
 	"website.goodwin.vpn/plane/internal/desired"
+	"website.goodwin.vpn/plane/internal/geo"
 	"website.goodwin.vpn/plane/internal/reality"
 	"website.goodwin.vpn/plane/internal/stack"
 	"website.goodwin.vpn/plane/internal/store"
@@ -88,6 +89,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/users/{id}/preview", s.withAuth(s.previewUser))
 	s.mux.HandleFunc("GET /sub/{token}", s.subscription)
 	s.mux.HandleFunc("GET /privacy", s.privacyPolicy)
+	s.mux.HandleFunc("GET /gw/v1/service", s.goodwinService)
+	s.mux.HandleFunc("GET /gw/v1/geo/manifest", s.geoManifest)
+	s.mux.HandleFunc("GET /gw/v1/geo/packs/{id}", s.geoPack)
 	if strings.TrimSpace(s.cfg.AdminDir) != "" {
 		s.mux.HandleFunc("GET /{path...}", s.adminStatic)
 	}
@@ -102,6 +106,31 @@ func (s *Server) privacyPolicy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(privacyHTML)
+}
+
+func (s *Server) goodwinService(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	writeJSON(w, http.StatusOK, sub.ServiceDocumentFor(s.cfg.PublicSubBase))
+}
+
+func (s *Server) geoManifest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	writeJSON(w, http.StatusOK, geo.Default().Manifest)
+}
+
+func (s *Server) geoPack(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	body, meta, ok := geo.Default().Pack(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "unknown pack")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("ETag", `"`+meta.SHA256+`"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func corsOrigins(publicSubBase string) map[string]struct{} {
@@ -1539,6 +1568,9 @@ func (s *Server) subscription(w http.ResponseWriter, r *http.Request) {
 	sub.WriteHeaders(h, hdr)
 	for k, v := range h {
 		w.Header().Set(k, v)
+	}
+	if v := sub.ServiceHeader(s.cfg.PublicSubBase); v != "" {
+		w.Header()["Goodwin-VPN"] = []string{v}
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, body)

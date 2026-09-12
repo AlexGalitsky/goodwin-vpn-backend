@@ -109,6 +109,59 @@ func TestWriteHeadersUserinfo(t *testing.T) {
 	if h["subscription-userinfo"] != want {
 		t.Fatalf("userinfo %q", h["subscription-userinfo"])
 	}
+	if _, ok := h["Goodwin-VPN"]; ok {
+		t.Fatal("WriteHeaders must not set Goodwin-VPN")
+	}
+}
+
+func TestServiceHeader(t *testing.T) {
+	got := ServiceHeader("https://saturn.goodwin.website")
+	if got != `v1; base="https://saturn.goodwin.website"` {
+		t.Fatalf("https origin: %q", got)
+	}
+	got = ServiceHeader("https://saturn.goodwin.website/sub/")
+	if got != `v1; base="https://saturn.goodwin.website"` {
+		t.Fatalf("strip path: %q", got)
+	}
+	got = ServiceHeader("https://example.com:8443")
+	if got != `v1; base="https://example.com:8443"` {
+		t.Fatalf("port: %q", got)
+	}
+	if ServiceHeader("http://127.0.0.1:8080") != "" {
+		t.Fatal("http public base must not advertise Goodwin-VPN")
+	}
+	if ServiceHeader("") != "" || ServiceHeader("not a url") != "" {
+		t.Fatal("invalid public base must be empty")
+	}
+	if ServiceHeader("https://user:pass@example.com") != "" {
+		t.Fatal("userinfo in PUBLIC_SUB_BASE must be empty")
+	}
+}
+
+func TestServiceDocumentFor(t *testing.T) {
+	got := ServiceDocumentFor("https://saturn.goodwin.website/sub/")
+	if got.Protocol != "goodwin-vpn" || got.Version != 1 {
+		t.Fatalf("protocol %+v", got)
+	}
+	if got.Name != "Goodwin VPN" {
+		t.Fatalf("name %q", got.Name)
+	}
+	if got.Privacy != "https://saturn.goodwin.website/privacy" {
+		t.Fatalf("privacy %q", got.Privacy)
+	}
+	if got.Features == nil {
+		t.Fatal("features must be empty slice, not null")
+	}
+	if len(got.Features) != 1 || got.Features[0] != "geo-packs" {
+		t.Fatalf("G3 advertises geo-packs: %v", got.Features)
+	}
+	httpDoc := ServiceDocumentFor("http://127.0.0.1:8080")
+	if httpDoc.Privacy != "" {
+		t.Fatalf("http origin must omit privacy: %q", httpDoc.Privacy)
+	}
+	if httpDoc.Protocol != "goodwin-vpn" {
+		t.Fatal("catalog is still served on local http")
+	}
 }
 
 func TestTTLink(t *testing.T) {

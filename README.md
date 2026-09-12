@@ -17,7 +17,9 @@ Admin: http://127.0.0.1:5173 password `change-me`.
 
 Dev user after seed: `http://127.0.0.1:8080/sub/dev-sub-token` (404 until a node is enrolled and attached to group `dev`). The Flutter app **rejects http://** — for a real import set `PUBLIC_SUB_BASE=https://…`.
 
-Public privacy policy (no auth): `GET /privacy` → `https://saturn.goodwin.website/privacy`. The Flutter app opens this URL from Settings → Privacy.
+Public privacy policy (no auth): `GET /privacy`. Catalog: `GET /gw/v1/service`. Geo packs (G3): `GET /gw/v1/geo/manifest` and `GET /gw/v1/geo/packs/ads` (no login). The Flutter app opens privacy from the catalog when a Goodwin subscription is imported, else Saturn.
+
+Open control-plane: HTTPS `GET /sub/{token}` adds `Goodwin-VPN: v1; base="https://…"`. `GET /gw/v1/service` returns name/privacy/`features` (`geo-packs` when the ads pack is present). Local `PUBLIC_SUB_BASE=http://127.0.0.1:8080` omits the header and the privacy URL in the catalog. Allowlist: `internal/geo/allowlist/`; `node tools/build_geo_packs.mjs --check`. Spec: client [`docs/goodwin-protocol.md`](https://github.com/AlexGalitsky/goodwin-vpn-client/blob/main/docs/goodwin-protocol.md). Do not change the `/sub` body contract.
 
 ## Panel VPS (API + admin, not the exit node)
 
