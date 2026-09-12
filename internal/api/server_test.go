@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -29,6 +30,25 @@ func TestAdminStaticDoesNotPanicOnRegister(t *testing.T) {
 	body, _ := io.ReadAll(res.Body)
 	if res.StatusCode != 200 || string(body) != "admin-ok" {
 		t.Fatalf("status %d body %q", res.StatusCode, body)
+	}
+
+	privacy, err := http.Get(ts.URL + "/privacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer privacy.Body.Close()
+	html, _ := io.ReadAll(privacy.Body)
+	if privacy.StatusCode != 200 {
+		t.Fatalf("privacy status %d", privacy.StatusCode)
+	}
+	if privacy.Header.Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("privacy content-type %q", privacy.Header.Get("Content-Type"))
+	}
+	if !strings.Contains(string(html), "GoodWin VPN Privacy Policy") {
+		t.Fatalf("privacy body missing title: %q", html[:min(len(html), 120)])
+	}
+	if !strings.Contains(string(html), "Политика конфиденциальности") {
+		t.Fatal("privacy body missing Russian section")
 	}
 }
 

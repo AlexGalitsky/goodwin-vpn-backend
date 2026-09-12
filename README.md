@@ -17,6 +17,8 @@ Admin: http://127.0.0.1:5173 password `change-me`.
 
 Dev user after seed: `http://127.0.0.1:8080/sub/dev-sub-token` (404 until a node is enrolled and attached to group `dev`). The Flutter app **rejects http://** — for a real import set `PUBLIC_SUB_BASE=https://…`.
 
+Public privacy policy (no auth): `GET /privacy` → `https://saturn.goodwin.website/privacy`. The Flutter app opens this URL from Settings → Privacy.
+
 ## Panel VPS (API + admin, not the exit node)
 
 Debian/Ubuntu, **root**. First install and later updates are the same command (git pull + rebuild + restart):

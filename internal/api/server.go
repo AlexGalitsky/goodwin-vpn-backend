@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -86,9 +87,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/nodes/{id}/apply", s.withAuth(s.applyNode))
 	s.mux.HandleFunc("GET /v1/users/{id}/preview", s.withAuth(s.previewUser))
 	s.mux.HandleFunc("GET /sub/{token}", s.subscription)
+	s.mux.HandleFunc("GET /privacy", s.privacyPolicy)
 	if strings.TrimSpace(s.cfg.AdminDir) != "" {
 		s.mux.HandleFunc("GET /{path...}", s.adminStatic)
 	}
+}
+
+//go:embed privacy.html
+var privacyHTML []byte
+
+func (s *Server) privacyPolicy(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(privacyHTML)
 }
 
 func corsOrigins(publicSubBase string) map[string]struct{} {

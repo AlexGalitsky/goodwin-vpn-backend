@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GoodWin VPN — Privacy Policy</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+      line-height: 1.55;
+      max-width: 40rem;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+    }
+    h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+    .meta { color: #666; margin-bottom: 2rem; }
+    h2 { font-size: 1.15rem; margin-top: 1.75rem; }
+    hr { border: 0; border-top: 1px solid #ccc; margin: 2.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>GoodWin VPN Privacy Policy</h1>
+  <p class="meta">Effective 12 September 2026 · <a href="#ru">Русский</a></p>
+
+  <p>GoodWin VPN is a local client. This build has no Goodwin account server and no analytics SDK.</p>
+
+  <h2>VPN</h2>
+  <p>On platforms with a system tunnel, device traffic is sent to the node in the share link you imported. The app does not operate a Goodwin proxy. If this OS has no system tunnel, Connect only starts a local SOCKS proxy at 127.0.0.1:10808.</p>
+
+  <h2>Configs and secrets</h2>
+  <p>Share links, saved profiles, and subscription URLs are stored on the device, encrypted with AES-256-GCM. The encryption key lives in the OS keystore / keychain, not next to the ciphertext. If the platform keystore is unavailable, the app cannot keep those values encrypted.</p>
+
+  <h2>Camera</h2>
+  <p>The camera is used only to scan a QR code that contains a share link or a subscription URL. Frames are not uploaded.</p>
+
+  <h2>Clipboard and backups</h2>
+  <p>Copy JSON to clipboard writes an unencrypted backup. Anyone who can read the clipboard can read those links. File export can use an optional password (AES-256-GCM).</p>
+
+  <h2>Installed apps (Android)</h2>
+  <p>Per-app split tunneling reads the launcher app list on the device so you can exclude apps from the VPN. That list stays on the device.</p>
+
+  <h2>Subscription refresh</h2>
+  <p>When you import an HTTPS subscription URL, the app fetches that URL (User-Agent <code>goodwin-vpn/1.0</code>) to load share links and optional quota headers. The app does not send a Goodwin account identity.</p>
+
+  <p>Questions: contact the operator who gave you the subscription URL.</p>
+
+  <hr>
+  <h1 id="ru">Политика конфиденциальности GoodWin VPN</h1>
+  <p class="meta">Действует с 12 сентября 2026</p>
+
+  <p>GoodWin VPN — локальный клиент. В этой сборке нет сервера аккаунтов Goodwin и нет SDK аналитики.</p>
+
+  <h2>VPN</h2>
+  <p>На платформах с системным туннелем трафик устройства уходит на ноду из импортированной ссылки. Приложение не поднимает прокси Goodwin. Если системного туннеля нет, Connect запускает только локальный SOCKS на 127.0.0.1:10808.</p>
+
+  <h2>Конфиги и секреты</h2>
+  <p>Share-ссылки, сохранённые профили и URL подписок хранятся на устройстве, шифруются AES-256-GCM. Ключ лежит в keystore / keychain ОС, не рядом с шифротекстом. Если keystore недоступен, приложение не сможет хранить эти значения зашифрованными.</p>
+
+  <h2>Камера</h2>
+  <p>Камера используется только чтобы считать QR с share-ссылкой или URL подписки. Кадры никуда не загружаются.</p>
+
+  <h2>Буфер обмена и резервные копии</h2>
+  <p>Копирование JSON в буфер — незашифрованный бэкап. Кто читает буфер, видит ссылки. Экспорт в файл может быть с паролем (AES-256-GCM).</p>
+
+  <h2>Установленные приложения (Android)</h2>
+  <p>Per-app split читает список приложений на устройстве, чтобы исключить их из VPN. Список остаётся на устройстве.</p>
+
+  <h2>Обновление подписки</h2>
+  <p>При импорте HTTPS-URL подписки приложение запрашивает этот URL (User-Agent <code>goodwin-vpn/1.0</code>), чтобы получить share-ссылки и необязательные заголовки квоты. Идентификатор аккаунта Goodwin приложение не отправляет.</p>
+
+  <p>Вопросы — оператору, который выдал URL подписки.</p>
+</body>
+</html>
