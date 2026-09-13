@@ -54,6 +54,8 @@ masquerade:
   proxy:
     url: https://www.cloudflare.com/
     rewriteHost: true
+trafficStats:
+  listen: 127.0.0.1:19999
 acl:
   inline:
     - reject(all, tcp/25)

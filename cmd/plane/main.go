@@ -22,7 +22,7 @@ func main() {
 		log.Fatalf("postgres: %v", err)
 	}
 	defer st.Close()
-	if getenv("SEED_DEV", "1") != "0" {
+	if getenv("SEED_DEV", "0") != "0" {
 		if err := st.SeedDev(ctx); err != nil {
 			log.Fatalf("seed: %v", err)
 		}
@@ -42,6 +42,7 @@ func main() {
 	pollCtx, pollCancel := context.WithCancel(context.Background())
 	defer pollCancel()
 	go srv.CollectTrafficLoop(pollCtx, pollEvery)
+	go srv.SweepEntitlementLoop(pollCtx, pollEvery)
 	go func() {
 		log.Printf("plane listen %s", addr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

@@ -32,6 +32,9 @@ func TestBuild(t *testing.T) {
 	if !strings.Contains(s, "reject(all, tcp/25)") || !strings.Contains(s, "tcp/587") {
 		t.Fatalf("smtp acl %s", s)
 	}
+	if !strings.Contains(s, "trafficStats:") || !strings.Contains(s, "127.0.0.1:19999") {
+		t.Fatalf("trafficStats %s", s)
+	}
 }
 
 func TestCertPaths(t *testing.T) {

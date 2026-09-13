@@ -218,6 +218,37 @@ spawnSync("systemctl", ["reset-failed", "goodwin-vpn-plane"], { encoding: "utf8"
 sh("systemctl", ["enable", "--now", "goodwin-vpn-plane"], { stdio: "inherit" });
 sh("systemctl", ["restart", "goodwin-vpn-plane"], { stdio: "inherit" });
 
+const dumpScript = path.join(prefix, "pg_dump_plane.mjs");
+copyFileSync(path.join(src, "tools/pg_dump_plane.mjs"), dumpScript);
+chmodSync(dumpScript, 0o755);
+mkdirSync("/var/backups/goodwin-plane", { recursive: true, mode: 0o750 });
+writeFileSync(
+  "/etc/systemd/system/goodwin-plane-pgdump.service",
+  `[Unit]
+Description=Goodwin plane Postgres dump
+
+[Service]
+Type=oneshot
+Environment=PLANE_PREFIX=${prefix}
+ExecStart=/usr/bin/node ${dumpScript}
+`,
+);
+writeFileSync(
+  "/etc/systemd/system/goodwin-plane-pgdump.timer",
+  `[Unit]
+Description=Daily Goodwin plane Postgres dump
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`,
+);
+sh("systemctl", ["daemon-reload"], { stdio: "inherit" });
+sh("systemctl", ["enable", "--now", "goodwin-plane-pgdump.timer"], { stdio: "inherit" });
+
 if (certDomain) {
   const caddy = `${certDomain} {
 	encode gzip

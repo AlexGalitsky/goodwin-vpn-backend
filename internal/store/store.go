@@ -97,16 +97,16 @@ type User struct {
 	ID          uuid.UUID
 	GroupID     uuid.UUID
 	DisplayName string
-	VlessUUID   string
-	Hy2Password string
-	TTUser      string
-	TTPassword  string
+	VlessUUID   string     `json:"-"`
+	Hy2Password string     `json:"-"`
+	TTUser      string     `json:"-"`
+	TTPassword  string     `json:"-"`
 	Upload      int64
 	Download    int64
 	Total       int64
 	Expire      *time.Time
 	Status      string
-	SubToken    string
+	SubToken    string `json:"-"`
 	Note        string
 }
 
@@ -387,6 +387,11 @@ func (s *Store) UpdateNode(ctx context.Context, n Node) error {
 	return err
 }
 
+func (s *Store) UpdateNodeStatus(ctx context.Context, id uuid.UUID, status string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE nodes SET status=$2 WHERE id=$1 AND status<>$2`, id, status)
+	return err
+}
+
 func (s *Store) Node(ctx context.Context, id uuid.UUID) (Node, error) {
 	var n Node
 	err := s.pool.QueryRow(ctx, `
@@ -608,7 +613,19 @@ func (s *Store) TTLink(ctx context.Context, nodeID, userID uuid.UUID) (string, e
 	return link, err
 }
 
+const (
+	TrafficXray = "xray"
+	TrafficHy2  = "hy2"
+)
+
 func (s *Store) ApplyXrayTraffic(ctx context.Context, nodeID, userID uuid.UUID, uplink, downlink int64) (addedUp, addedDown int64, u User, err error) {
+	return s.ApplyTraffic(ctx, nodeID, userID, TrafficXray, uplink, downlink)
+}
+
+func (s *Store) ApplyTraffic(ctx context.Context, nodeID, userID uuid.UUID, source string, uplink, downlink int64) (addedUp, addedDown int64, u User, err error) {
+	if source == "" {
+		source = TrafficXray
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, 0, User{}, err
@@ -624,7 +641,7 @@ func (s *Store) ApplyXrayTraffic(ctx context.Context, nodeID, userID uuid.UUID, 
 	}
 
 	var prevUp, prevDown int64
-	qerr := tx.QueryRow(ctx, `SELECT uplink, downlink FROM traffic_cursor WHERE node_id=$1 AND user_id=$2 FOR UPDATE`, nodeID, userID).Scan(&prevUp, &prevDown)
+	qerr := tx.QueryRow(ctx, `SELECT uplink, downlink FROM traffic_cursor WHERE node_id=$1 AND user_id=$2 AND source=$3 FOR UPDATE`, nodeID, userID, source).Scan(&prevUp, &prevDown)
 	if qerr != nil && !errors.Is(qerr, pgx.ErrNoRows) {
 		return 0, 0, User{}, qerr
 	}
@@ -637,9 +654,9 @@ func (s *Store) ApplyXrayTraffic(ctx context.Context, nodeID, userID uuid.UUID, 
 		addedDown = downlink
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO traffic_cursor (node_id, user_id, uplink, downlink) VALUES ($1,$2,$3,$4)
-		ON CONFLICT (node_id, user_id) DO UPDATE SET uplink=EXCLUDED.uplink, downlink=EXCLUDED.downlink`,
-		nodeID, userID, uplink, downlink); err != nil {
+		INSERT INTO traffic_cursor (node_id, user_id, source, uplink, downlink) VALUES ($1,$2,$3,$4,$5)
+		ON CONFLICT (node_id, user_id, source) DO UPDATE SET uplink=EXCLUDED.uplink, downlink=EXCLUDED.downlink`,
+		nodeID, userID, source, uplink, downlink); err != nil {
 		return 0, 0, User{}, err
 	}
 	if addedUp != 0 || addedDown != 0 {

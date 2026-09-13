@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"website.goodwin.vpn/plane/internal/sysd"
 )
 
 const (
@@ -113,10 +115,10 @@ ExecStart=%s %s %s
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=1048576
-
+%s
 [Install]
 WantedBy=multi-user.target
-`, workDir, bin, vpnPath, hostsPath)
+`, workDir, bin, vpnPath, hostsPath, sysd.Extra)
 	if err := os.WriteFile("/etc/systemd/system/goodwin-trusttunnel.service", []byte(unit), 0o644); err != nil {
 		return err
 	}

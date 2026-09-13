@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -43,13 +44,35 @@ type Config struct {
 }
 
 type Server struct {
-	store *store.Store
-	cfg   Config
-	mux   *http.ServeMux
+	store        *store.Store
+	cfg          Config
+	mux          *http.ServeMux
+	applyMu      sync.Map // node ID → *sync.Mutex
+	kickMu       sync.Mutex
+	pendingKicks map[uuid.UUID]struct{}
+	loginMu      sync.Mutex
+	loginFails   map[string][]time.Time
+	healthMu     sync.Mutex
+	healthByNode map[uuid.UUID]healthSnap
 }
 
+type healthSnap struct {
+	at    time.Time
+	alive bool
+	h     agentclient.Health
+}
+
+const healthTTL = 15 * time.Second
+
 func New(st *store.Store, cfg Config) *Server {
-	s := &Server{store: st, cfg: cfg, mux: http.NewServeMux()}
+	s := &Server{
+		store:        st,
+		cfg:          cfg,
+		mux:          http.NewServeMux(),
+		pendingKicks: map[uuid.UUID]struct{}{},
+		loginFails:   map[string][]time.Time{},
+		healthByNode: map[uuid.UUID]healthSnap{},
+	}
 	s.routes()
 	return s
 }
@@ -83,6 +106,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/nodes/{id}/enroll", s.withAuth(s.enrollNode))
 	s.mux.HandleFunc("PUT /v1/nodes/{id}/groups", s.withAuth(s.setNodeGroups))
 	s.mux.HandleFunc("PUT /v1/nodes/{id}/stack", s.withAuth(s.setNodeStack))
+	s.mux.HandleFunc("PATCH /v1/nodes/{id}", s.withAuth(s.patchNode))
+	s.mux.HandleFunc("POST /v1/nodes/apply-all", s.withAuth(s.applyAllNodes))
 	s.mux.HandleFunc("GET /v1/nodes/{id}/health", s.withAuth(s.nodeHealth))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/exec", s.withAuth(s.nodeExec))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/apply", s.withAuth(s.applyNode))
@@ -195,12 +220,54 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	ip := loginIP(r)
+	if !s.loginAllowed(ip) {
+		writeErr(w, http.StatusTooManyRequests, "too many attempts")
+		return
+	}
 	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(s.cfg.AdminPassword)) != 1 {
+		s.loginFailed(ip)
 		writeErr(w, http.StatusUnauthorized, "bad password")
 		return
 	}
+	s.loginOK(ip)
 	http.SetCookie(w, s.sessionCookie(s.signSession(), 7*24*3600))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func loginIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func (s *Server) loginAllowed(ip string) bool {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	cutoff := time.Now().Add(-15 * time.Minute)
+	fails := s.loginFails[ip]
+	kept := fails[:0]
+	for _, t := range fails {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	s.loginFails[ip] = kept
+	return len(kept) < 10
+}
+
+func (s *Server) loginFailed(ip string) {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	s.loginFails[ip] = append(s.loginFails[ip], time.Now())
+}
+
+func (s *Server) loginOK(ip string) {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	delete(s.loginFails, ip)
 }
 
 func (s *Server) sessionCookie(value string, maxAge int) *http.Cookie {
@@ -333,16 +400,9 @@ func (s *Server) probeFleet(ctx context.Context, nodes []store.Node) []FleetNode
 	for i, n := range nodes {
 		go func(i int, n store.Node) {
 			p := probe{i: i, n: n}
-			if strings.TrimSpace(n.IPv4) != "" && strings.TrimSpace(n.AgentToken) != "" {
-				cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				c := agentclient.New(fmt.Sprintf("http://%s:%d", n.IPv4, n.ControlPort), n.AgentToken)
-				h, err := c.Health(cctx)
-				cancel()
-				if err == nil {
-					p.alive = h.OK
-					p.h = h
-				}
-			}
+			alive, h := s.probeNodeHealth(ctx, n)
+			p.alive = alive
+			p.h = h
 			ch <- p
 		}(i, n)
 	}
@@ -589,6 +649,9 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if req.Protocols != nil {
+		_ = s.applyGroupNodes(r.Context(), g.ID)
+	}
 	writeJSON(w, http.StatusOK, g)
 }
 
@@ -620,21 +683,28 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	type row struct {
-		store.User
-		SubURL    string `json:"sub_url"`
-		ImportURL string `json:"import_url"`
-	}
-	out := make([]row, 0, len(us))
+	out := make([]map[string]any, 0, len(us))
 	for _, u := range us {
-		sub := s.subURL(u.SubToken)
-		out = append(out, row{
-			User:      u,
-			SubURL:    sub,
-			ImportURL: "goodwin://import?url=" + url.QueryEscape(sub),
-		})
+		out = append(out, s.publicUser(u))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) publicUser(u store.User) map[string]any {
+	subURL := s.subURL(u.SubToken)
+	return map[string]any{
+		"ID":          u.ID,
+		"GroupID":     u.GroupID,
+		"DisplayName": u.DisplayName,
+		"Upload":      u.Upload,
+		"Download":    u.Download,
+		"Total":       u.Total,
+		"Expire":      u.Expire,
+		"Status":      u.Status,
+		"Note":        u.Note,
+		"sub_url":     subURL,
+		"import_url":  "goodwin://import?url=" + url.QueryEscape(subURL),
+	}
 }
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
@@ -732,10 +802,14 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		created = append(created, u)
 		lastURL = s.subURL(u.SubToken)
 	}
+	// VLESS/Hy2 share links are synthesized from stored creds; tt:// is minted
+	// on the node during Apply. Without this, a new user's /sub has no TrustTunnel.
+	applied := s.applyGroupNodes(r.Context(), gid)
 	out := map[string]any{
-		"count":      len(created),
-		"sub_url":    lastURL,
-		"import_url": "goodwin://import?url=" + url.QueryEscape(lastURL),
+		"count":         len(created),
+		"sub_url":       lastURL,
+		"import_url":    "goodwin://import?url=" + url.QueryEscape(lastURL),
+		"applied_nodes": applied,
 	}
 	if len(created) == 1 {
 		out["user"] = created[0]
@@ -941,18 +1015,52 @@ func (s *Server) applyGroupNodes(ctx context.Context, groupID uuid.UUID) int {
 	applied := 0
 	nids, err := s.store.NodeIDsForGroup(ctx, groupID)
 	if err != nil {
+		s.markKick(groupID)
 		return 0
 	}
+	if len(nids) == 0 {
+		s.clearKick(groupID)
+		return 0
+	}
+	ok := 0
 	for _, nid := range nids {
 		n, err := s.store.Node(ctx, nid)
 		if err != nil {
 			continue
 		}
 		if _, _, err := s.applyStoredNode(ctx, n, true); err == nil {
+			ok++
 			applied++
 		}
 	}
+	if ok < len(nids) {
+		s.markKick(groupID)
+	} else {
+		s.clearKick(groupID)
+	}
 	return applied
+}
+
+func (s *Server) markKick(gid uuid.UUID) {
+	s.kickMu.Lock()
+	defer s.kickMu.Unlock()
+	s.pendingKicks[gid] = struct{}{}
+}
+
+func (s *Server) clearKick(gid uuid.UUID) {
+	s.kickMu.Lock()
+	defer s.kickMu.Unlock()
+	delete(s.pendingKicks, gid)
+}
+
+func (s *Server) pendingKickCopy() []uuid.UUID {
+	s.kickMu.Lock()
+	defer s.kickMu.Unlock()
+	out := make([]uuid.UUID, 0, len(s.pendingKicks))
+	for gid := range s.pendingKicks {
+		out = append(out, gid)
+	}
+	return out
 }
 
 func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
@@ -1170,7 +1278,17 @@ func (s *Server) setNodeGroups(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	applied := 0
+	if n, err := s.store.Node(r.Context(), id); err == nil {
+		if _, _, err := s.applyStoredNode(r.Context(), n, true); err == nil {
+			applied = 1
+		} else {
+			for _, gid := range ids {
+				s.markKick(gid)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied_nodes": applied})
 }
 
 func (s *Server) setNodeStack(w http.ResponseWriter, r *http.Request) {
@@ -1199,7 +1317,79 @@ func (s *Server) setNodeStack(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if _, _, err := s.applyStoredNode(r.Context(), n, true); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"spec": spec, "apply_error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, spec)
+}
+
+func (s *Server) patchNode(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "id")
+		return
+	}
+	n, err := s.store.Node(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "node")
+		return
+	}
+	var req struct {
+		Hostname *string `json:"hostname"`
+		Name     *string `json:"name"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeErr(w, http.StatusBadRequest, "name")
+			return
+		}
+		n.Name = name
+	}
+	if req.Hostname != nil {
+		n.Hostname = strings.TrimSpace(*req.Hostname)
+	}
+	if stack.NeedsHostname(n.Families) && strings.TrimSpace(n.Hostname) == "" {
+		writeErr(w, http.StatusBadRequest, "hostname required for hy2/tt (Let's Encrypt SAN)")
+		return
+	}
+	if err := s.store.UpdateNode(r.Context(), n); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	applied := 0
+	if n.Status != "pending" {
+		if _, _, err := s.applyStoredNode(r.Context(), n, true); err == nil {
+			applied = 1
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied_nodes": applied})
+}
+
+func (s *Server) applyAllNodes(w http.ResponseWriter, r *http.Request) {
+	nodes, err := s.store.ListNodes(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	applied := 0
+	var errs []string
+	for _, n := range nodes {
+		if n.Status == "pending" || strings.TrimSpace(n.IPv4) == "" {
+			continue
+		}
+		if _, _, err := s.applyStoredNode(r.Context(), n, true); err != nil {
+			errs = append(errs, n.Name+": "+err.Error())
+			continue
+		}
+		applied++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": len(errs) == 0, "applied_nodes": applied, "errors": errs})
 }
 
 func (s *Server) nodeHealth(w http.ResponseWriter, r *http.Request) {
@@ -1216,6 +1406,7 @@ func (s *Server) nodeHealth(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	s.cacheNodeHealth(n.ID, h.OK, h)
 	s.noteNodeAlive(r.Context(), &n, h.OK)
 	writeJSON(w, http.StatusOK, map[string]any{"node_id": n.ID, "health": h, "node_status": n.Status})
 }
@@ -1262,7 +1453,15 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (s *Server) nodeApplyMu(id uuid.UUID) *sync.Mutex {
+	v, _ := s.applyMu.LoadOrStore(id, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty bool) (map[string]any, int, error) {
+	mu := s.nodeApplyMu(n.ID)
+	mu.Lock()
+	defer mu.Unlock()
 	if strings.TrimSpace(n.IPv4) == "" || strings.TrimSpace(n.AgentToken) == "" {
 		return nil, http.StatusBadRequest, errors.New("node not enrolled")
 	}
@@ -1294,7 +1493,7 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 	for _, gid := range gids {
 		g, err := s.store.Group(ctx, gid)
 		if err != nil {
-			continue
+			return nil, http.StatusInternalServerError, fmt.Errorf("group %s: %w", gid, err)
 		}
 		users, err := s.store.UsersInGroup(ctx, gid)
 		if err != nil {
@@ -1416,6 +1615,7 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 	if err := s.store.UpdateNode(ctx, n); err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
+	s.forgetNodeHealth(n.ID)
 	if res.TTListen && len(res.TTLinks) > 0 {
 		links := map[uuid.UUID]string{}
 		for _, l := range res.TTLinks {
@@ -1622,7 +1822,7 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 			if err != nil {
 				return
 			}
-			alive := s.agentAlive(ctx, n)
+			alive, _ := s.probeNodeHealth(ctx, n)
 			s.noteNodeAlive(ctx, &n, alive)
 			probes[i] = probed{n: n, alive: alive}
 		}(i, nid)
@@ -1711,14 +1911,43 @@ func (s *Server) subURL(token string) string {
 }
 
 func (s *Server) agentAlive(ctx context.Context, n store.Node) bool {
+	alive, _ := s.probeNodeHealth(ctx, n)
+	return alive
+}
+
+func (s *Server) probeNodeHealth(ctx context.Context, n store.Node) (bool, agentclient.Health) {
 	if strings.TrimSpace(n.IPv4) == "" || strings.TrimSpace(n.AgentToken) == "" {
-		return false
+		return false, agentclient.Health{}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	s.healthMu.Lock()
+	if snap, ok := s.healthByNode[n.ID]; ok && time.Since(snap.at) < healthTTL {
+		s.healthMu.Unlock()
+		return snap.alive, snap.h
+	}
+	s.healthMu.Unlock()
+
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	c := agentclient.New(fmt.Sprintf("http://%s:%d", n.IPv4, n.ControlPort), n.AgentToken)
-	h, err := c.Health(ctx)
-	return err == nil && h.OK
+	h, err := c.Health(cctx)
+	alive := err == nil && h.OK
+	if err != nil {
+		h = agentclient.Health{}
+	}
+	s.cacheNodeHealth(n.ID, alive, h)
+	return alive, h
+}
+
+func (s *Server) cacheNodeHealth(id uuid.UUID, alive bool, h agentclient.Health) {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	s.healthByNode[id] = healthSnap{at: time.Now(), alive: alive, h: h}
+}
+
+func (s *Server) forgetNodeHealth(id uuid.UUID) {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	delete(s.healthByNode, id)
 }
 
 func (s *Server) noteNodeAlive(ctx context.Context, n *store.Node, alive bool) {
@@ -1734,7 +1963,7 @@ func (s *Server) noteNodeAlive(ctx context.Context, n *store.Node, alive bool) {
 		return
 	}
 	n.Status = next
-	_ = s.store.UpdateNode(ctx, *n)
+	_ = s.store.UpdateNodeStatus(ctx, n.ID, next)
 }
 
 func randomToken(n int) (string, error) {

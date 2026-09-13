@@ -26,7 +26,7 @@ func main() {
 	flag.Parse()
 
 	cfg := fileConfig{
-		Listen:    getenv("AGENT_LISTEN", "0.0.0.0:19400"),
+		Listen:    getenv("AGENT_LISTEN", "127.0.0.1:19400"),
 		Token:     os.Getenv("AGENT_TOKEN"),
 		AllowExec: getenv("AGENT_ALLOW_EXEC", "1") != "0",
 	}
@@ -40,7 +40,7 @@ func main() {
 		}
 	}
 	if cfg.Listen == "" {
-		cfg.Listen = "0.0.0.0:19400"
+		cfg.Listen = "127.0.0.1:19400"
 	}
 	if cfg.Token == "" {
 		cfg.Token = mustToken()

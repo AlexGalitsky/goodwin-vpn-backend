@@ -2,19 +2,30 @@ package hy2run
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
+
+	"website.goodwin.vpn/plane/internal/releasebin"
+	"website.goodwin.vpn/plane/internal/sysd"
 )
 
-const releaseBase = "https://github.com/apernet/hysteria/releases/latest/download/"
+const (
+	Release     = "2.12.2"
+	releaseBase = "https://github.com/apernet/hysteria/releases/download/app/v" + Release + "/"
+)
+
+var binSHA256 = map[string]string{
+	"hysteria-linux-amd64": "6493dfffd55b5883f64c76c63880ecc32988f0c568c9ca9014907877b4d55f94",
+	"hysteria-linux-arm64": "ebfacc1ec3a0edfd742cd68ce17f292a6092e606b9d11f99b035c1d888f3d709",
+}
 
 func BinName() string {
 	if runtime.GOARCH == "arm64" {
@@ -25,40 +36,33 @@ func BinName() string {
 
 func EnsureBinary(ctx context.Context, dir string) (string, error) {
 	bin := filepath.Join(dir, "hysteria")
-	if st, err := os.Stat(bin); err == nil && st.Mode().IsRegular() {
+	pin := filepath.Join(dir, "PIN")
+	if st, err := os.Stat(bin); err == nil && st.Mode().IsRegular() && releasebin.PinMatches(pin, Release) {
 		return bin, nil
 	}
-	url := releaseBase + BinName()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
+	name := BinName()
+	sum, ok := binSHA256[name]
+	if !ok {
+		return "", fmt.Errorf("no sha256 for %s", name)
 	}
-	res, err := http.DefaultClient.Do(req)
+	raw, err := releasebin.Get(ctx, releaseBase+name, sum, 80<<20)
 	if err != nil {
-		return "", err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return "", fmt.Errorf("download hysteria: %s", res.Status)
+		return "", fmt.Errorf("download hysteria: %w", err)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	raw, err := io.ReadAll(io.LimitReader(res.Body, 80<<20))
-	if err != nil {
+	if err := releasebin.WriteFile(bin, raw, 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(bin, raw, 0o755); err != nil {
+	if err := releasebin.WriteFile(pin, []byte(Release+"\n"), 0o644); err != nil {
 		return "", err
 	}
 	return bin, nil
 }
 
 func WriteFile(path string, raw []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, raw, mode)
+	return releasebin.WriteFile(path, raw, mode)
 }
 
 func InstallUnit(bin, cfgPath string) error {
@@ -73,10 +77,10 @@ ExecStart=%s server -c %s
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=1048576
-
+%s
 [Install]
 WantedBy=multi-user.target
-`, bin, cfgPath)
+`, bin, cfgPath, sysd.Extra)
 	if err := os.WriteFile("/etc/systemd/system/goodwin-hysteria.service", []byte(unit), 0o644); err != nil {
 		return err
 	}
@@ -112,15 +116,27 @@ func StopUnit() error {
 }
 
 func Listening(port int) bool {
-	if runtime.GOOS == "linux" && exec.Command("systemctl", "is-active", "--quiet", "goodwin-hysteria").Run() == nil {
-		return true
+	if port <= 0 {
+		return false
 	}
 	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
-	if err != nil {
-		return true
+	if err == nil {
+		_ = c.Close()
+		return false
 	}
-	_ = c.Close()
-	return false
+	return addrInUse(err)
+}
+
+func addrInUse(err error) bool {
+	var op *net.OpError
+	if errors.As(err, &op) {
+		err = op.Err
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.EADDRINUSE
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "address already in use")
 }
 
 func Version(bin string) string {

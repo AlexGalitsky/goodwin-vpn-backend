@@ -83,7 +83,7 @@
 
 Импорт в приложении: вставка, QR, `goodwin://import?url=`.
 
-Открытый сервис поверх `/sub` (заголовок `Goodwin-VPN`, `serviceBase`, geo-packs): канон в клиенте [`docs/goodwin-protocol.md`](https://github.com/AlexGalitsky/goodwin-vpn-client/blob/main/docs/goodwin-protocol.md). Тело `/sub` и 404≠200 **не менять**. G0: `GET /sub/{token}` ставит `Goodwin-VPN` на https `PUBLIC_SUB_BASE`. G2: публичный `GET /gw/v1/service` (имя, privacy, `features[]`). G3: публичные `GET /gw/v1/geo/manifest` и `GET /gw/v1/geo/packs/ads` (allowlist в `internal/geo/allowlist/`, sha256; `features` содержит `geo-packs`).
+Открытый сервис поверх `/sub`: канон клиента [`goodwin-vpn-client/docs/goodwin-protocol.md`](https://github.com/AlexGalitsky/goodwin-vpn-client/blob/main/docs/goodwin-protocol.md), отдача панели — [`docs/goodwin-protocol.md`](./docs/goodwin-protocol.md). Тело `/sub` и 404≠200 **не менять**.
 
 ---
 

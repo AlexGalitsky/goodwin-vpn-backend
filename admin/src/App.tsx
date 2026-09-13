@@ -78,6 +78,29 @@ const FAMILIES = [
   { id: "hy2", label: "Hysteria2" },
   { id: "tt", label: "TrustTunnel" },
 ] as const;
+
+function familyPreset(families: string[]): string {
+  const set = new Set(families || []);
+  if (set.size === 1 && set.has("vless")) return "stealth";
+  if (set.size === 1 && set.has("hy2")) return "hy2";
+  if (set.size === 1 && set.has("tt")) return "tt";
+  return "max";
+}
+
+function specForPreset(preset: string): { families: string[]; ports: Record<string, number> } {
+  switch (preset) {
+    case "stealth":
+      return { families: ["vless"], ports: { vless_tcp: 443 } };
+    case "hy2":
+      return { families: ["hy2"], ports: { hy2_udp: 443 } };
+    case "tt":
+      return { families: ["tt"], ports: { tt: 443 } };
+    case "tt-first":
+      return { families: ["vless", "hy2", "tt"], ports: { vless_tcp: 8443, hy2_udp: 8443, tt: 443 } };
+    default:
+      return { families: ["vless", "hy2", "tt"], ports: { vless_tcp: 443, hy2_udp: 443, tt: 8443 } };
+  }
+}
 const TABS = [
   { id: "overview", label: "Обзор" },
   { id: "nodes", label: "Ноды" },
@@ -176,6 +199,9 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers ?? {}),
     },
   });
+  if (res.status === 401 && !path.startsWith("/v1/auth/")) {
+    onUnauthorized?.();
+  }
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) {
@@ -184,10 +210,19 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+let onUnauthorized: (() => void) | null = null;
+
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [err, setErr] = useState("");
+
+  useEffect(() => {
+    onUnauthorized = () => setAuthed(false);
+    return () => {
+      onUnauthorized = null;
+    };
+  }, []);
 
   useEffect(() => {
     api("/v1/me")
@@ -499,9 +534,33 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
       <div className="card">
         <h2>Ноды</h2>
         <p className="muted">
-          Пользователь видит только ноды своей группы. После смены групп — Apply. Мёртвый agent
-          пропадает из подписки.
+          Пользователь видит только ноды своей группы. После смены групп или стека — Apply. Мёртвый
+          agent пропадает из подписки. TrustTunnel в квоту не входит.
         </p>
+        <div className="row" style={{ marginBottom: 12 }}>
+          <button
+            type="button"
+            onClick={async () => {
+              onError("");
+              try {
+                const res = await api<{ applied_nodes?: number; errors?: string[] }>(
+                  "/v1/nodes/apply-all",
+                  { method: "POST", body: "{}" },
+                );
+                setApplyLog((p) => ({
+                  ...p,
+                  all: `Apply all: ${res.applied_nodes || 0}${(res.errors || []).length ? " · " + res.errors!.join("; ") : ""}`,
+                }));
+                await load();
+              } catch (e) {
+                onError(catchErr(e, "apply all"));
+              }
+            }}
+          >
+            Apply all
+          </button>
+          {applyLog.all ? <span className="muted">{applyLog.all}</span> : null}
+        </div>
         <table>
           <thead>
             <tr>
@@ -520,8 +579,34 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
                   <td>
                     {n.Name}
                     <div className="muted">
-                      {n.IPv4 || "—"} · {n.Hostname || "без hostname"}
+                      {n.IPv4 || "—"}
                     </div>
+                    <input
+                      value={n.Hostname || ""}
+                      placeholder="hostname"
+                      onChange={(e) =>
+                        setNodes((prev) =>
+                          prev.map((x) => (x.ID === n.ID ? { ...x, Hostname: e.target.value } : x)),
+                        )
+                      }
+                      style={{ marginTop: 4, width: "100%" }}
+                    />
+                    <select
+                      value={familyPreset(n.Families || [])}
+                      onChange={(e) => {
+                        const spec = specForPreset(e.target.value);
+                        setNodes((prev) =>
+                          prev.map((x) => (x.ID === n.ID ? { ...x, Families: spec.families } : x)),
+                        );
+                      }}
+                      style={{ marginTop: 4, width: "100%" }}
+                    >
+                      <option value="max">max (все три)</option>
+                      <option value="tt-first">TT-first</option>
+                      <option value="stealth">только VLESS</option>
+                      <option value="hy2">только Hy2</option>
+                      <option value="tt">только TT</option>
+                    </select>
                     {applyLog[n.ID] ? <div className="apply-log">{applyLog[n.ID]}</div> : null}
                   </td>
                   <td>
@@ -550,9 +635,18 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
                               method: "PUT",
                               body: JSON.stringify({ group_ids: n.group_ids || [] }),
                             });
+                            await api(`/v1/nodes/${n.ID}`, {
+                              method: "PATCH",
+                              body: JSON.stringify({ hostname: n.Hostname || "" }),
+                            });
+                            const spec = specForPreset(familyPreset(n.Families || []));
+                            await api(`/v1/nodes/${n.ID}/stack`, {
+                              method: "PUT",
+                              body: JSON.stringify(spec),
+                            });
                             await load();
                           } catch (e) {
-                            onError(catchErr(e, "группы"));
+                            onError(catchErr(e, "группы/стек"));
                           }
                         }}
                       >
@@ -639,6 +733,7 @@ function Users({ onError }: { onError: (s: string) => void }) {
   const [filterGroup, setFilterGroup] = useState("all");
   const [preview, setPreview] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   async function load() {
     try {
@@ -657,7 +752,15 @@ function Users({ onError }: { onError: (s: string) => void }) {
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return users.filter((u) => {
-      if (status !== "all" && u.Status !== status) return false;
+      const quotaDone = u.Total > 0 && u.Upload + u.Download >= u.Total;
+      const expired = expireLabel(u.Expire) === "истёк";
+      if (status === "expired") {
+        if (!expired) return false;
+      } else if (status === "quota") {
+        if (!quotaDone) return false;
+      } else if (status !== "all" && u.Status !== status) {
+        return false;
+      }
       if (filterGroup !== "all" && u.GroupID !== filterGroup) return false;
       if (!needle) return true;
       const g = groups.find((x) => x.ID === u.GroupID)?.Name || "";
@@ -667,8 +770,9 @@ function Users({ onError }: { onError: (s: string) => void }) {
 
   async function create(e: FormEvent) {
     e.preventDefault();
+    setCreating(true);
     try {
-      await api("/v1/users", {
+      const res = await api<{ applied_nodes?: number }>("/v1/users", {
         method: "POST",
         body: JSON.stringify({
           group_id: groupId,
@@ -679,8 +783,13 @@ function Users({ onError }: { onError: (s: string) => void }) {
       });
       setName("");
       await load();
+      if (!res.applied_nodes) {
+        onError("Пользователь создан, но ноды не обновились. Apply вручную — иначе в подписке не будет TrustTunnel.");
+      }
     } catch (e) {
       onError(catchErr(e, "создать"));
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -715,9 +824,12 @@ function Users({ onError }: { onError: (s: string) => void }) {
           Сколько
           <input value={count} onChange={(e) => setCount(e.target.value)} style={{ width: 80 }} />
         </label>
-        <button className="primary" type="submit">
-          Создать
+        <button className="primary" type="submit" disabled={creating}>
+          {creating ? "Создаём…" : "Создать"}
         </button>
+        <p className="muted">
+          Создание сразу Apply на ноды группы. Без этого в /sub есть VLESS/Hy2, но нет tt://.
+        </p>
       </form>
       <div className="card">
         <h2>Пользователи</h2>
@@ -731,6 +843,8 @@ function Users({ onError }: { onError: (s: string) => void }) {
             <option value="active">активен</option>
             <option value="disabled">выкл.</option>
             <option value="revoked">отозван</option>
+            <option value="expired">истёк</option>
+            <option value="quota">квота</option>
           </select>
           <select value={filterGroup} onChange={(e) => setFilterGroup(e.target.value)}>
             <option value="all">все группы</option>
@@ -820,18 +934,33 @@ function UserDetail({
   const [display, setDisplay] = useState(u.DisplayName);
   const [note, setNote] = useState(u.Note || "");
   const [quotaGiB, setQuotaGiB] = useState(bytesToGiB(u.Total));
+  const [copied, setCopied] = useState("");
   useEffect(() => {
     setDisplay(u.DisplayName);
     setNote(u.Note || "");
     setQuotaGiB(bytesToGiB(u.Total));
   }, [u.ID, u.DisplayName, u.Note, u.Total]);
 
+  async function copyText(text: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(label);
+      window.setTimeout(() => setCopied(""), 2000);
+    } catch (e) {
+      onError(catchErr(e, "копировать"));
+    }
+  }
+
   return (
     <div className="card grid" style={{ marginTop: 12 }}>
       <div className="muted">{u.Status === "revoked" ? "Отозван — старый URL даёт 404." : u.sub_url}</div>
+      {u.Status !== "revoked" && u.import_url ? (
+        <div className="muted">deeplink: {u.import_url}</div>
+      ) : null}
+      {copied ? <p className="ok">Скопировано: {copied}</p> : null}
       <div className="muted">
-        VLESS: {bytesToGiB(u.Upload + u.Download)}
-        {u.Total ? ` / ${bytesToGiB(u.Total)}` : " / ∞"} GiB (Hy2/TT не считаются)
+        VLESS+Hy2: {bytesToGiB(u.Upload + u.Download)}
+        {u.Total ? ` / ${bytesToGiB(u.Total)}` : " / ∞"} GiB (TrustTunnel не считается)
       </div>
       <div className="row">
         <label>
@@ -908,15 +1037,20 @@ function UserDetail({
           Без срока
         </button>
         {u.Status !== "revoked" ? (
-          <button type="button" onClick={() => void navigator.clipboard.writeText(u.sub_url)}>
+          <button type="button" onClick={() => void copyText(u.sub_url, "URL подписки")}>
             Копировать URL
+          </button>
+        ) : null}
+        {u.Status !== "revoked" && u.import_url ? (
+          <button type="button" onClick={() => void copyText(u.import_url, "deeplink")}>
+            Копировать import
           </button>
         ) : null}
         {u.Status !== "revoked" ? (
           <button
             type="button"
             onClick={async () => {
-              if (!window.confirm("Сменить ссылку? Старый URL станет 404, доступ сохранится.")) return;
+              if (!window.confirm("Новая ссылка? Ключи те же, старый URL станет 404.")) return;
               try {
                 await api(`/v1/users/${u.ID}/rotate`, { method: "POST", body: "{}" });
                 await onReload();
@@ -1109,6 +1243,12 @@ function GroupRow({
     return 0;
   }
 
+  const dirty =
+    name !== g.Name ||
+    giBToBytes(quotaGiB) !== g.QuotaBytes ||
+    hours() !== (g.ExpireDefaultHours || 0) ||
+    JSON.stringify([...(protocols || [])].sort()) !== JSON.stringify([...(g.Protocols || [])].sort());
+
   return (
     <div>
       <div className="row" style={{ marginBottom: 8 }}>
@@ -1155,7 +1295,7 @@ function GroupRow({
             }
           }}
         >
-          Сохранить
+          Сохранить{dirty ? " · не сохранено" : ""}
         </button>
         <button
           type="button"
@@ -1206,7 +1346,7 @@ function RealitySettings({ onError }: { onError: (s: string) => void }) {
           });
           setDest(res.reality_dest);
           setSni(res.reality_sni);
-          setSaved("Сохранено. Нажмите Apply на titan и mimas — ключи REALITY не меняются.");
+          setSaved("Сохранено. Apply на нодах — ключи REALITY не меняются.");
         } catch (err) {
           onError(catchErr(err, "сохранить dest/SNI"));
         }
@@ -1237,9 +1377,10 @@ function CollectTraffic({ onError }: { onError: (s: string) => void }) {
   const [out, setOut] = useState("");
   return (
     <div className="card grid">
-      <h2>Трафик VLESS</h2>
+      <h2>Трафик VLESS+Hy2</h2>
       <p className="muted">
-        Plane забирает Xray statsquery с нод каждую минуту. Hy2/TT не входят. После квоты — пустое /sub и Apply.
+        Plane забирает Xray statsquery и Hy2 /traffic с нод каждую минуту. TrustTunnel не входит. После
+        квоты — пустое /sub и Apply.
       </p>
       <button
         type="button"

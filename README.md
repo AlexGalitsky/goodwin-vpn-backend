@@ -8,8 +8,8 @@ Subscription URLs in, share links out. Spec: [`plan.md`](./plan.md).
 ```bash
 docker compose up -d db
 go test ./...
-go run ./cmd/plane          # :8080   ADMIN_PASSWORD=change-me
-go run ./cmd/agent          # :19400  prints token if AGENT_TOKEN unset
+SEED_DEV=1 go run ./cmd/plane   # :8080   ADMIN_PASSWORD=change-me
+go run ./cmd/agent              # :19400  prints token if AGENT_TOKEN unset
 cd admin && npm install && npm run dev   # :5173
 ```
 
@@ -19,7 +19,7 @@ Dev user after seed: `http://127.0.0.1:8080/sub/dev-sub-token` (404 until a node
 
 Public privacy policy (no auth): `GET /privacy`. Catalog: `GET /gw/v1/service`. Geo packs (G3): `GET /gw/v1/geo/manifest` and `GET /gw/v1/geo/packs/ads` (no login). The Flutter app opens privacy from the catalog when a Goodwin subscription is imported, else Saturn.
 
-Open control-plane: HTTPS `GET /sub/{token}` adds `Goodwin-VPN: v1; base="https://…"`. `GET /gw/v1/service` returns name/privacy/`features` (`geo-packs` when the ads pack is present). Local `PUBLIC_SUB_BASE=http://127.0.0.1:8080` omits the header and the privacy URL in the catalog. Allowlist: `internal/geo/allowlist/`; `node tools/build_geo_packs.mjs --check`. Spec: client [`docs/goodwin-protocol.md`](https://github.com/AlexGalitsky/goodwin-vpn-client/blob/main/docs/goodwin-protocol.md). Do not change the `/sub` body contract.
+Open control-plane: spec [`docs/goodwin-protocol.md`](./docs/goodwin-protocol.md) (client behaviour: [goodwin-vpn-client](https://github.com/AlexGalitsky/goodwin-vpn-client/blob/main/docs/goodwin-protocol.md)). Аудит 2026-09-13: [`docs/audit-2026-09-13.md`](./docs/audit-2026-09-13.md). План: [`docs/work-plan-2026-09-13.md`](./docs/work-plan-2026-09-13.md). HTTPS `GET /sub/{token}` adds `Goodwin-VPN: v1; base="https://…"`. Do not change the `/sub` body contract (404 ≠ empty 200). Allowlist: `internal/geo/allowlist/`; `node tools/build_geo_packs.mjs --check`.
 
 ## Panel VPS (API + admin, not the exit node)
 
@@ -36,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/ma
 На чистом Debian/Ubuntu, **root**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=titan.goodwin.website bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=titan.goodwin.website SATURN_IP=x.x.x.x bash
 ```
 
 Скрипт ставит Node.js 22, Go, клонирует репо, собирает agent и вызывает `tools/install_vpn_node.mjs`. Печатает token для админки. `CERT_DOMAIN` — Let's Encrypt на этот hostname (порт 80). Saturn / админку скрипт не ставит.
@@ -44,7 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/ma
 Приватный репо:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env GITHUB_TOKEN=ghp_... CERT_DOMAIN=titan.goodwin.website bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env GITHUB_TOKEN=ghp_... CERT_DOMAIN=titan.goodwin.website SATURN_IP=x.x.x.x bash
 ```
 
 Или локальная сборка:
@@ -52,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/ma
 ```bash
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/agent ./cmd/agent
 scp bin/agent tools/install_vpn_node.mjs root@VPS:/tmp/
-sudo node /tmp/install_vpn_node.mjs --bin /tmp/agent
+sudo node /tmp/install_vpn_node.mjs --bin /tmp/agent --allow-from SATURN_IP
 ```
 
 Copy IPv4 + token into admin → New node (pick **one** group, hostname = `CERT_DOMAIN`). Then **Exec** on the node card (`uname -a`, `ss -lntp`). Apply.
@@ -76,8 +76,8 @@ curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/ma
 2. Обновить **обе** ноды (token не сменится). UDP 443 должен быть открыт:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=titan.goodwin.website bash
-curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=mimas.goodwin.website bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=titan.goodwin.website SATURN_IP=x.x.x.x bash
+curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/main/tools/bootstrap_vpn_node.sh | sudo env CERT_DOMAIN=mimas.goodwin.website SATURN_IP=x.x.x.x bash
 ```
 
 3. Проверить сертификат: `ls /etc/letsencrypt/live/titan.goodwin.website/` (и то же для mimas). Если нет — тот же bootstrap с `CERT_DOMAIN`.
@@ -118,3 +118,26 @@ curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/ma
 Обзор, поиск пользователей, чекбоксы групп на ноде, удаление пустой группы / пользователя / ноды из панели.
 
 `allow_exec` is on by default. Leave it on for this fleet.
+
+## Backup / restore (Postgres)
+
+Daily `pg_dump` on the panel VPS (Saturn): systemd timer `goodwin-plane-pgdump.timer` (03:17 local). Dumps live in `/var/backups/goodwin-plane/plane-YYYYMMDD.sql.gz` (14 days). Bootstrap/install copies the script and enables the timer.
+
+Manual dump:
+
+```bash
+sudo node /opt/goodwin-vpn-plane/pg_dump_plane.mjs
+```
+
+Restore onto a **copy** of the volume (not live Saturn until you have taken a fresh dump):
+
+```bash
+# stop plane so it is not writing
+sudo systemctl stop goodwin-vpn-plane
+# optional: snapshot the docker volume first
+sudo node /opt/goodwin-vpn-plane/pg_dump_plane.mjs --restore /var/backups/goodwin-plane/plane-YYYYMMDD.sql.gz
+sudo systemctl start goodwin-vpn-plane
+```
+
+The dump is the REALITY keys, sub tokens, and traffic cursors. Losing the DB means re-issuing keys and links.
+

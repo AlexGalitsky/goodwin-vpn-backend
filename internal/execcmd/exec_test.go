@@ -24,6 +24,20 @@ func TestRunDisabled(t *testing.T) {
 	}
 }
 
+func TestRunKillsProcessGroup(t *testing.T) {
+	start := time.Now()
+	res, err := Run(context.Background(), "sleep 30", 200*time.Millisecond, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode == 0 {
+		t.Fatalf("expected killed, got %+v", res)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("process group still running after %s", time.Since(start))
+	}
+}
+
 func TestRunFillsHomeWhenUnset(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CACHE_HOME", "")

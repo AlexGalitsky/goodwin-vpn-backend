@@ -64,9 +64,10 @@ func (c *Client) Health(ctx context.Context) (Health, error) {
 }
 
 type Stats struct {
-	OK     bool                `json:"ok"`
-	Users  []xrayrun.UserBytes `json:"users"`
-	Detail string              `json:"detail,omitempty"`
+	OK       bool                `json:"ok"`
+	Users    []xrayrun.UserBytes `json:"users"`
+	Hy2Users []xrayrun.UserBytes `json:"hy2_users"`
+	Detail   string              `json:"detail,omitempty"`
 }
 
 func (c *Client) Stats(ctx context.Context) (Stats, error) {
@@ -76,6 +77,9 @@ func (c *Client) Stats(ctx context.Context) (Stats, error) {
 	}
 	if st.Users == nil {
 		st.Users = []xrayrun.UserBytes{}
+	}
+	if st.Hy2Users == nil {
+		st.Hy2Users = []xrayrun.UserBytes{}
 	}
 	return st, nil
 }

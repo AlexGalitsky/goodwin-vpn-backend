@@ -9,7 +9,8 @@
 #   BRANCH        git branch (default: main)
 #   CERT_DOMAIN   e.g. titan.goodwin.website — issue Let's Encrypt cert (standalone :80)
 #   ISSUE_CERT    1/0 (default 1 if CERT_DOMAIN is set)
-#   AGENT_LISTEN  default 0.0.0.0:19400
+#   AGENT_LISTEN  default 0.0.0.0:19400 (needs SATURN_IP)
+#   SATURN_IP     plane IPv4 allowed to :19400 (required for public listen)
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -23,6 +24,7 @@ BRANCH="${BRANCH:-main}"
 CERT_DOMAIN="${CERT_DOMAIN:-}"
 ISSUE_CERT="${ISSUE_CERT:-}"
 AGENT_LISTEN="${AGENT_LISTEN:-0.0.0.0:19400}"
+SATURN_IP="${SATURN_IP:-}"
 WORKDIR="${WORKDIR:-/opt/goodwin-vpn-src}"
 
 if [[ -n "${GITHUB_TOKEN:-}" && "${REPO}" == https://github.com/* ]]; then
@@ -63,7 +65,7 @@ cd "${WORKDIR}"
 agent_bin=/tmp/goodwin-vpn-agent
 CGO_ENABLED=0 go build -o "${agent_bin}" ./cmd/agent
 
-node "${WORKDIR}/tools/install_vpn_node.mjs" --bin "${agent_bin}" --listen "${AGENT_LISTEN}"
+node "${WORKDIR}/tools/install_vpn_node.mjs" --bin "${agent_bin}" --listen "${AGENT_LISTEN}" ${SATURN_IP:+--allow-from "${SATURN_IP}"}
 
 if [[ -z "${ISSUE_CERT}" && -n "${CERT_DOMAIN}" ]]; then
   ISSUE_CERT=1
@@ -72,6 +74,13 @@ if [[ "${ISSUE_CERT}" == "1" && -n "${CERT_DOMAIN}" ]]; then
   apt-get install -y certbot
   certbot certonly --standalone --non-interactive --agree-tos \
     --register-unsafely-without-email -d "${CERT_DOMAIN}"
+  mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/goodwin-vpn <<'EOF'
+#!/bin/sh
+systemctl try-restart goodwin-hysteria.service goodwin-trusttunnel.service >/dev/null 2>&1 || true
+exit 0
+EOF
+  chmod 755 /etc/letsencrypt/renewal-hooks/deploy/goodwin-vpn
   echo "TLS cert: /etc/letsencrypt/live/${CERT_DOMAIN}/"
 fi
 

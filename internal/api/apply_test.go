@@ -1,0 +1,257 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"website.goodwin.vpn/plane/internal/desired"
+	"website.goodwin.vpn/plane/internal/stack"
+	"website.goodwin.vpn/plane/internal/store"
+)
+
+func TestApplyDisableExpireRevoke(t *testing.T) {
+	st := openApplyTestStore(t)
+	ctx := context.Background()
+
+	agent := &fakeAgent{listen: true}
+	ts := httptest.NewServer(agent.handler())
+	t.Cleanup(ts.Close)
+	host, port := mustHostPort(t, ts.URL)
+
+	g, err := st.CreateGroup(ctx, "apply-"+uuid.NewString()[:8], []string{stack.FamilyVLESS}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteGroup(ctx, g.ID) })
+
+	u, err := st.CreateUser(ctx, store.User{
+		GroupID:     g.ID,
+		DisplayName: "panel",
+		VlessUUID:   uuid.NewString(),
+		Hy2Password: "hy2pass",
+		TTUser:      "u1",
+		TTPassword:  "ttpass",
+		Status:      "active",
+		SubToken:    "tok-" + uuid.NewString(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteUser(ctx, u.ID) })
+
+	n, err := st.CreateNode(ctx, store.Node{
+		ID:              uuid.New(),
+		Name:            "fake-" + uuid.NewString()[:8],
+		IPv4:            host,
+		ControlPort:     port,
+		Families:        []string{stack.FamilyVLESS},
+		AppliedFamilies: []string{},
+		PortsJSON:       json.RawMessage(`{"vless_tcp":443}`),
+		Status:          "enrolled",
+		AgentToken:      "test-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteNode(ctx, n.ID) })
+	if err := st.SetNodeGroups(ctx, n.ID, []uuid.UUID{g.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(st, Config{
+		AdminPassword: "x",
+		SessionSecret: "y",
+		PublicSubBase: "https://saturn.example",
+	})
+
+	if _, _, err := s.applyStoredNode(ctx, n, true); err != nil {
+		t.Fatalf("create apply: %v", err)
+	}
+	if got := agent.vlessIDs(); len(got) != 1 || got[0] != u.VlessUUID {
+		t.Fatalf("create desired %v want %s", got, u.VlessUUID)
+	}
+	assertSub(t, s, u.SubToken, http.StatusOK, false)
+
+	u.Status = "disabled"
+	if err := st.UpdateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	n, _ = st.Node(ctx, n.ID)
+	if _, _, err := s.applyStoredNode(ctx, n, true); err != nil {
+		t.Fatalf("disable apply: %v", err)
+	}
+	if got := agent.vlessIDs(); len(got) != 0 {
+		t.Fatalf("disable left uuid on node: %v", got)
+	}
+	assertSub(t, s, u.SubToken, http.StatusOK, true)
+
+	u.Status = "active"
+	past := time.Now().UTC().Add(-time.Hour)
+	u.Expire = &past
+	if err := st.UpdateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	n, _ = st.Node(ctx, n.ID)
+	if _, _, err := s.applyStoredNode(ctx, n, true); err != nil {
+		t.Fatalf("expire apply: %v", err)
+	}
+	if got := agent.vlessIDs(); len(got) != 0 {
+		t.Fatalf("expire left uuid on node: %v", got)
+	}
+	assertSub(t, s, u.SubToken, http.StatusOK, true)
+
+	u.Expire = nil
+	if err := st.UpdateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	n, _ = st.Node(ctx, n.ID)
+	if _, _, err := s.applyStoredNode(ctx, n, true); err != nil {
+		t.Fatalf("re-enable apply: %v", err)
+	}
+	if got := agent.vlessIDs(); len(got) != 1 {
+		t.Fatalf("re-enable desired %v", got)
+	}
+
+	old := u.SubToken
+	if err := st.RevokeUser(ctx, u.ID, "revoked-"+uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	n, _ = st.Node(ctx, n.ID)
+	if _, _, err := s.applyStoredNode(ctx, n, true); err != nil {
+		t.Fatalf("revoke apply: %v", err)
+	}
+	if got := agent.vlessIDs(); len(got) != 0 {
+		t.Fatalf("revoke left uuid on node: %v", got)
+	}
+	assertSub(t, s, old, http.StatusNotFound, true)
+}
+
+func assertSub(t *testing.T, s *Server, token string, wantStatus int, wantEmpty bool) {
+	t.Helper()
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	res, err := http.Get(ts.URL + "/sub/" + token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != wantStatus {
+		t.Fatalf("sub status %d want %d body %q", res.StatusCode, wantStatus, body)
+	}
+	if wantStatus == http.StatusOK && wantEmpty && strings.TrimSpace(string(body)) != "" {
+		t.Fatalf("sub should be empty, got %q", body)
+	}
+}
+
+type fakeAgent struct {
+	mu     sync.Mutex
+	last   desired.State
+	listen bool
+}
+
+func (a *fakeAgent) vlessIDs() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.last.VLESS == nil {
+		return nil
+	}
+	out := make([]string, 0, len(a.last.VLESS.Clients))
+	for _, c := range a.last.VLESS.Clients {
+		out = append(out, c.ID)
+	}
+	return out
+}
+
+func (a *fakeAgent) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "xray_listen": a.listen})
+	})
+	mux.HandleFunc("PUT /v1/desired", func(w http.ResponseWriter, r *http.Request) {
+		var st desired.State
+		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.mu.Lock()
+		a.last = st
+		a.mu.Unlock()
+		writeJSON(w, http.StatusOK, desired.ApplyResult{OK: true, XrayListen: a.listen, Detail: "fake"})
+	})
+	return mux
+}
+
+func mustHostPort(t *testing.T, raw string) (string, int) {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host == "" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return host, port
+}
+
+func openApplyTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	base := os.Getenv("TEST_DATABASE_URL")
+	if base == "" {
+		base = "postgres://plane:plane@127.0.0.1:5432/plane?sslmode=disable"
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, base)
+	if err != nil {
+		t.Skipf("postgres: %v", err)
+	}
+	if err := admin.Ping(ctx); err != nil {
+		admin.Close()
+		t.Skipf("postgres: %v", err)
+	}
+	name := "plane_apply_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	if _, err := admin.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", name)); err != nil {
+		admin.Close()
+		t.Skipf("create database: %v", err)
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Path = "/" + name
+	st, err := store.Open(ctx, u.String())
+	if err != nil {
+		_, _ = admin.Exec(ctx, fmt.Sprintf("DROP DATABASE %s WITH (FORCE)", name))
+		admin.Close()
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		st.Close()
+		_, _ = admin.Exec(context.Background(), fmt.Sprintf("DROP DATABASE %s WITH (FORCE)", name))
+		admin.Close()
+	})
+	return st
+}

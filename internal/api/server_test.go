@@ -232,3 +232,37 @@ func TestGeoPacksPublic(t *testing.T) {
 		t.Fatalf("unknown pack status %d", missing.StatusCode)
 	}
 }
+
+func TestLoginRateLimit(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("admin-ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(nil, Config{
+		AdminPassword: "secret",
+		SessionSecret: "y",
+		AdminDir:      dir,
+	})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	post := func() *http.Response {
+		res, err := http.Post(ts.URL+"/v1/auth/login", "application/json", strings.NewReader(`{"password":"nope"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.ReadAll(res.Body)
+		_ = res.Body.Close()
+		return res
+	}
+	for i := 0; i < 10; i++ {
+		res := post()
+		if res.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status %d", i+1, res.StatusCode)
+		}
+	}
+	res := post()
+	if res.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after 10 failures, got %d", res.StatusCode)
+	}
+}

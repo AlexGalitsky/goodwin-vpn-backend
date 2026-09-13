@@ -12,7 +12,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
+
+	"website.goodwin.vpn/plane/internal/lehook"
 
 	"website.goodwin.vpn/plane/internal/desired"
 	"website.goodwin.vpn/plane/internal/execcmd"
@@ -34,8 +37,9 @@ type Config struct {
 }
 
 type Server struct {
-	cfg Config
-	mux *http.ServeMux
+	cfg     Config
+	mux     *http.ServeMux
+	applyMu sync.Mutex
 }
 
 func New(cfg Config) *Server {
@@ -85,6 +89,10 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	host, _ := os.Hostname()
+	xrayPort := xrayrun.ReadPortFile(filepath.Join(s.cfg.Prefix, "xray.port"))
+	if xrayPort <= 0 {
+		xrayPort = 443
+	}
 	hy2Port := hy2run.ReadPortFile(filepath.Join(s.cfg.Prefix, "hy2.port"))
 	ttPort := ttrun.ReadPortFile(filepath.Join(s.cfg.Prefix, "trusttunnel", "tt.port"))
 	snap := hoststat.Snapshot("/")
@@ -94,7 +102,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"hostname":     host,
 		"allow_exec":   s.cfg.AllowExec,
 		"version":      s.cfg.Version,
-		"xray_listen":  xrayrun.Listening(443),
+		"xray_listen":  xrayrun.Listening(xrayPort),
 		"hy2_listen":   hy2Port > 0 && hy2run.Listening(hy2Port),
 		"tt_listen":    ttPort > 0 && ttrun.Listening(),
 		"xray_version": binVersion(filepath.Join(s.cfg.Prefix, "xray", "xray"), xrayrun.Version),
@@ -124,9 +132,15 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	if users == nil {
 		users = []xrayrun.UserBytes{}
 	}
-	out := map[string]any{"ok": err == nil, "users": users}
+	hy2, hyErr := hy2run.QueryTraffic(r.Context(), hy2run.TrafficAddr)
+	if hy2 == nil {
+		hy2 = []xrayrun.UserBytes{}
+	}
+	out := map[string]any{"ok": err == nil && hyErr == nil, "users": users, "hy2_users": hy2}
 	if err != nil {
 		out["detail"] = err.Error()
+	} else if hyErr != nil {
+		out["detail"] = hyErr.Error()
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -156,6 +170,8 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) desired(w http.ResponseWriter, r *http.Request) {
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	var st desired.State
 	defer r.Body.Close()
 	if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&st); err != nil {
@@ -245,8 +261,11 @@ func applyVLESS(ctx context.Context, prefix string, v desired.VLESS) (desired.Ap
 			return desired.ApplyResult{}, err
 		}
 	}
-	time.Sleep(800 * time.Millisecond)
-	listen := xrayrun.Listening(v.Port)
+	if err := xrayrun.WriteConfig(filepath.Join(prefix, "xray.port"), []byte(fmt.Sprintf("%d\n", v.Port))); err != nil {
+		return desired.ApplyResult{}, err
+	}
+	time.Sleep(400 * time.Millisecond)
+	listen := xrayrun.ListeningWait(v.Port, 8)
 	return desired.ApplyResult{
 		OK:          listen,
 		XrayListen:  listen,
@@ -318,11 +337,12 @@ func applyHy2(ctx context.Context, prefix string, h desired.Hy2) (desired.ApplyR
 		return desired.ApplyResult{}, err
 	}
 	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		_ = lehook.Install()
 		if err := hy2run.InstallUnit(bin, cfgPath); err != nil {
 			return desired.ApplyResult{}, err
 		}
 	}
-	time.Sleep(800 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond)
 	listen := hy2run.Listening(h.Port)
 	return desired.ApplyResult{
 		OK:         listen,
@@ -392,6 +412,7 @@ func applyTT(ctx context.Context, prefix string, t desired.TT) (desired.ApplyRes
 		return desired.ApplyResult{}, err
 	}
 	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		_ = lehook.Install()
 		if err := ttrun.InstallUnit(bin, dir, vpnPath, hostsPath); err != nil {
 			return desired.ApplyResult{}, err
 		}
