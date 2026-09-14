@@ -50,6 +50,8 @@ type Server struct {
 	applyMu      sync.Map // node ID → *sync.Mutex
 	kickMu       sync.Mutex
 	pendingKicks map[uuid.UUID]struct{}
+	entitledMu   sync.Mutex
+	entitled     map[uuid.UUID]bool
 	loginMu      sync.Mutex
 	loginFails   map[string][]time.Time
 	healthMu     sync.Mutex
@@ -70,6 +72,7 @@ func New(st *store.Store, cfg Config) *Server {
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
 		pendingKicks: map[uuid.UUID]struct{}{},
+		entitled:     map[uuid.UUID]bool{},
 		loginFails:   map[string][]time.Time{},
 		healthByNode: map[uuid.UUID]healthSnap{},
 	}
@@ -562,6 +565,7 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		Protocols          []string `json:"protocols"`
 		QuotaBytes         int64    `json:"quota_bytes"`
 		ExpireDefaultHours int      `json:"expire_default_hours"`
+		QuotaReset         string   `json:"quota_reset"`
 	}
 	if err := readJSON(r, &req); err != nil || strings.TrimSpace(req.Name) == "" {
 		writeErr(w, http.StatusBadRequest, "name required")
@@ -582,7 +586,12 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	if req.ExpireDefaultHours < 0 {
 		req.ExpireDefaultHours = 0
 	}
-	g, err := s.store.CreateGroup(r.Context(), req.Name, req.Protocols, req.QuotaBytes, req.ExpireDefaultHours)
+	quotaReset, err := sub.ParseQuotaReset(req.QuotaReset)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "quota_reset")
+		return
+	}
+	g, err := s.store.CreateGroupReset(r.Context(), req.Name, req.Protocols, req.QuotaBytes, req.ExpireDefaultHours, quotaReset)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -609,6 +618,7 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 		Name               *string  `json:"name"`
 		QuotaBytes         *int64   `json:"quota_bytes"`
 		ExpireDefaultHours *int     `json:"expire_default_hours"`
+		QuotaReset         *string  `json:"quota_reset"`
 		Protocols          []string `json:"protocols"`
 	}
 	if err := readJSON(r, &req); err != nil {
@@ -636,6 +646,14 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.ExpireDefaultHours = *req.ExpireDefaultHours
+	}
+	if req.QuotaReset != nil {
+		kind, err := sub.ParseQuotaReset(*req.QuotaReset)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "quota_reset")
+			return
+		}
+		g.QuotaReset = kind
 	}
 	if req.Protocols != nil {
 		protos, err := stack.NormalizeFamilies(req.Protocols)
@@ -693,29 +711,32 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) publicUser(u store.User) map[string]any {
 	subURL := s.subURL(u.SubToken)
 	return map[string]any{
-		"ID":          u.ID,
-		"GroupID":     u.GroupID,
-		"DisplayName": u.DisplayName,
-		"Upload":      u.Upload,
-		"Download":    u.Download,
-		"Total":       u.Total,
-		"Expire":      u.Expire,
-		"Status":      u.Status,
-		"Note":        u.Note,
-		"sub_url":     subURL,
-		"import_url":  "goodwin://import?url=" + url.QueryEscape(subURL),
+		"ID":               u.ID,
+		"GroupID":          u.GroupID,
+		"DisplayName":      u.DisplayName,
+		"Upload":           u.Upload,
+		"Download":         u.Download,
+		"Total":            u.Total,
+		"Expire":           u.Expire,
+		"Status":           u.Status,
+		"Note":             u.Note,
+		"QuotaReset":       u.QuotaReset,
+		"QuotaPeriodStart": u.QuotaPeriodStart,
+		"sub_url":          subURL,
+		"import_url":       "goodwin://import?url=" + url.QueryEscape(subURL),
 	}
 }
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		GroupID     string `json:"group_id"`
-		DisplayName string `json:"display_name"`
-		Note        string `json:"note"`
-		Total       *int64 `json:"total"`
-		ExpireUnix  *int64 `json:"expire_unix"`
-		ExpireHours *int   `json:"expire_hours"`
-		Count       int    `json:"count"`
+		GroupID     string  `json:"group_id"`
+		DisplayName string  `json:"display_name"`
+		Note        string  `json:"note"`
+		Total       *int64  `json:"total"`
+		ExpireUnix  *int64  `json:"expire_unix"`
+		ExpireHours *int    `json:"expire_hours"`
+		QuotaReset  *string `json:"quota_reset"`
+		Count       int     `json:"count"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json")
@@ -771,6 +792,19 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 			Total:       g.QuotaBytes,
 			Status:      "active",
 			SubToken:    token,
+			QuotaReset:  g.QuotaReset,
+		}
+		if req.QuotaReset != nil {
+			kind, err := sub.ParseQuotaReset(*req.QuotaReset)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, "quota_reset")
+				return
+			}
+			u.QuotaReset = kind
+		}
+		if u.QuotaReset != "" {
+			start := sub.PeriodStart(time.Now().UTC(), u.QuotaReset)
+			u.QuotaPeriodStart = &start
 		}
 		if req.Total != nil {
 			if *req.Total < 0 {
@@ -843,12 +877,13 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 		Total       *int64  `json:"total"`
 		ExpireUnix  *int64  `json:"expire_unix"`
 		ExtendHours *int    `json:"extend_hours"`
+		QuotaReset  *string `json:"quota_reset"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if req.Status == nil && req.DisplayName == nil && req.Note == nil && req.Upload == nil && req.Download == nil && req.Total == nil && req.ExpireUnix == nil && req.ExtendHours == nil {
+	if req.Status == nil && req.DisplayName == nil && req.Note == nil && req.Upload == nil && req.Download == nil && req.Total == nil && req.ExpireUnix == nil && req.ExtendHours == nil && req.QuotaReset == nil {
 		writeErr(w, http.StatusBadRequest, "no fields")
 		return
 	}
@@ -907,6 +942,20 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 		}
 		t := base.Add(time.Duration(h) * time.Hour)
 		u.Expire = &t
+	}
+	if req.QuotaReset != nil {
+		kind, err := sub.ParseQuotaReset(*req.QuotaReset)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "quota_reset")
+			return
+		}
+		u.QuotaReset = kind
+		if kind == "" {
+			u.QuotaPeriodStart = nil
+		} else if u.QuotaPeriodStart == nil {
+			start := sub.PeriodStart(time.Now().UTC(), kind)
+			u.QuotaPeriodStart = &start
+		}
 	}
 	if err := s.store.UpdateUser(r.Context(), u); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())

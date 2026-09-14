@@ -127,13 +127,45 @@ func (s *Server) SweepEntitlement(ctx context.Context) map[string]any {
 		log.Printf("sweep users: %v", err)
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	groups := map[uuid.UUID]struct{}{}
+	reset := 0
+	adopted := 0
+	type snap struct {
+		id  uuid.UUID
+		gid uuid.UUID
+		ok  bool
+	}
+	snaps := make([]snap, 0, len(users))
 	for _, u := range users {
-		if !sub.Entitled(u.Status, u.Expire, u.Upload, u.Download, u.Total, now) {
-			groups[u.GroupID] = struct{}{}
+		if sub.PeriodDue(u.QuotaReset, u.QuotaPeriodStart, now) {
+			start := sub.PeriodStart(now, u.QuotaReset)
+			zero := u.QuotaPeriodStart != nil && !u.QuotaPeriodStart.IsZero()
+			if err := s.store.ResetQuotaPeriod(ctx, u.ID, start, zero); err != nil {
+				log.Printf("sweep quota %s: %v", u.ID, err)
+			} else if zero {
+				reset++
+				u.Upload, u.Download = 0, 0
+				groups[u.GroupID] = struct{}{}
+			} else {
+				adopted++
+			}
+		}
+		ok := sub.Entitled(u.Status, u.Expire, u.Upload, u.Download, u.Total, now)
+		snaps = append(snaps, snap{id: u.ID, gid: u.GroupID, ok: ok})
+	}
+	s.entitledMu.Lock()
+	prevMap := s.entitled
+	next := make(map[uuid.UUID]bool, len(snaps))
+	for _, row := range snaps {
+		next[row.id] = row.ok
+		prev, seen := prevMap[row.id]
+		if (!seen && !row.ok) || (seen && prev != row.ok) {
+			groups[row.gid] = struct{}{}
 		}
 	}
+	s.entitled = next
+	s.entitledMu.Unlock()
 	for _, gid := range s.pendingKickCopy() {
 		groups[gid] = struct{}{}
 	}
@@ -141,5 +173,5 @@ func (s *Server) SweepEntitlement(ctx context.Context) map[string]any {
 	for gid := range groups {
 		applied += s.applyGroupNodes(ctx, gid)
 	}
-	return map[string]any{"ok": true, "groups": len(groups), "applied_nodes": applied}
+	return map[string]any{"ok": true, "groups": len(groups), "applied_nodes": applied, "users_reset": reset, "users_adopted": adopted}
 }

@@ -1,0 +1,9 @@
+-- +goose Up
+ALTER TABLE groups ADD COLUMN IF NOT EXISTS quota_reset TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS quota_reset TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS quota_period_start TIMESTAMPTZ;
+
+-- +goose Down
+ALTER TABLE users DROP COLUMN IF EXISTS quota_period_start;
+ALTER TABLE users DROP COLUMN IF EXISTS quota_reset;
+ALTER TABLE groups DROP COLUMN IF EXISTS quota_reset;

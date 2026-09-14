@@ -141,6 +141,154 @@ func TestApplyDisableExpireRevoke(t *testing.T) {
 	assertSub(t, s, old, http.StatusNotFound, true)
 }
 
+func TestSweepExpireKicksOnce(t *testing.T) {
+	st := openApplyTestStore(t)
+	ctx := context.Background()
+	agent := &fakeAgent{listen: true}
+	ts := httptest.NewServer(agent.handler())
+	t.Cleanup(ts.Close)
+	host, port := mustHostPort(t, ts.URL)
+
+	g, err := st.CreateGroup(ctx, "sweep-"+uuid.NewString()[:8], []string{stack.FamilyVLESS}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteGroup(ctx, g.ID) })
+	u, err := st.CreateUser(ctx, store.User{
+		GroupID:     g.ID,
+		DisplayName: "exp",
+		VlessUUID:   uuid.NewString(),
+		Hy2Password: "hy2pass",
+		TTUser:      "u1",
+		TTPassword:  "ttpass",
+		Status:      "active",
+		SubToken:    "tok-" + uuid.NewString(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteUser(ctx, u.ID) })
+	n, err := st.CreateNode(ctx, store.Node{
+		ID:              uuid.New(),
+		Name:            "fake-" + uuid.NewString()[:8],
+		IPv4:            host,
+		ControlPort:     port,
+		Families:        []string{stack.FamilyVLESS},
+		AppliedFamilies: []string{},
+		PortsJSON:       json.RawMessage(`{"vless_tcp":443}`),
+		Status:          "enrolled",
+		AgentToken:      "test-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteNode(ctx, n.ID) })
+	if err := st.SetNodeGroups(ctx, n.ID, []uuid.UUID{g.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(st, Config{AdminPassword: "x", SessionSecret: "y", PublicSubBase: "https://saturn.example"})
+	if _, _, err := s.applyStoredNode(ctx, n, true); err != nil {
+		t.Fatalf("create apply: %v", err)
+	}
+	if got := agent.vlessIDs(); len(got) != 1 {
+		t.Fatalf("create desired %v", got)
+	}
+	putsAfterCreate := agent.putCount()
+
+	past := time.Now().UTC().Add(-time.Hour)
+	u.Expire = &past
+	if err := st.UpdateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+
+	out := s.SweepEntitlement(ctx)
+	if ok, _ := out["ok"].(bool); !ok {
+		t.Fatalf("sweep %v", out)
+	}
+	if got := agent.vlessIDs(); len(got) != 0 {
+		t.Fatalf("sweep left uuid on node: %v", got)
+	}
+	putsAfterSweep := agent.putCount()
+	if putsAfterSweep <= putsAfterCreate {
+		t.Fatal("sweep did not Apply")
+	}
+
+	s.SweepEntitlement(ctx)
+	if agent.putCount() != putsAfterSweep {
+		t.Fatalf("second sweep re-applied, puts %d want %d", agent.putCount(), putsAfterSweep)
+	}
+}
+
+func TestSweepRetriesFailedKick(t *testing.T) {
+	st := openApplyTestStore(t)
+	ctx := context.Background()
+	agent := &fakeAgent{listen: true}
+	ts := httptest.NewServer(agent.handler())
+	t.Cleanup(ts.Close)
+	host, port := mustHostPort(t, ts.URL)
+
+	g, err := st.CreateGroup(ctx, "retry-"+uuid.NewString()[:8], []string{stack.FamilyVLESS}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteGroup(ctx, g.ID) })
+	u, err := st.CreateUser(ctx, store.User{
+		GroupID:     g.ID,
+		DisplayName: "retry",
+		VlessUUID:   uuid.NewString(),
+		Hy2Password: "hy2pass",
+		TTUser:      "u1",
+		TTPassword:  "ttpass",
+		Status:      "active",
+		SubToken:    "tok-" + uuid.NewString(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteUser(ctx, u.ID) })
+	n, err := st.CreateNode(ctx, store.Node{
+		ID:              uuid.New(),
+		Name:            "fake-" + uuid.NewString()[:8],
+		IPv4:            host,
+		ControlPort:     port,
+		Families:        []string{stack.FamilyVLESS},
+		AppliedFamilies: []string{},
+		PortsJSON:       json.RawMessage(`{"vless_tcp":443}`),
+		Status:          "enrolled",
+		AgentToken:      "test-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteNode(ctx, n.ID) })
+	if err := st.SetNodeGroups(ctx, n.ID, []uuid.UUID{g.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(st, Config{AdminPassword: "x", SessionSecret: "y", PublicSubBase: "https://saturn.example"})
+	if _, _, err := s.applyStoredNode(ctx, n, true); err != nil {
+		t.Fatalf("create apply: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour)
+	u.Expire = &past
+	if err := st.UpdateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+
+	agent.setFailPut(true)
+	s.SweepEntitlement(ctx)
+	if got := agent.vlessIDs(); len(got) != 1 {
+		t.Fatalf("failed kick should leave uuid, got %v", got)
+	}
+
+	agent.setFailPut(false)
+	s.SweepEntitlement(ctx)
+	if got := agent.vlessIDs(); len(got) != 0 {
+		t.Fatalf("retry left uuid on node: %v", got)
+	}
+}
+
 func assertSub(t *testing.T, s *Server, token string, wantStatus int, wantEmpty bool) {
 	t.Helper()
 	ts := httptest.NewServer(s.Handler())
@@ -160,9 +308,23 @@ func assertSub(t *testing.T, s *Server, token string, wantStatus int, wantEmpty 
 }
 
 type fakeAgent struct {
-	mu     sync.Mutex
-	last   desired.State
-	listen bool
+	mu      sync.Mutex
+	last    desired.State
+	listen  bool
+	puts    int
+	failPut bool
+}
+
+func (a *fakeAgent) putCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.puts
+}
+
+func (a *fakeAgent) setFailPut(v bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.failPut = v
 }
 
 func (a *fakeAgent) vlessIDs() []string {
@@ -184,6 +346,14 @@ func (a *fakeAgent) handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "xray_listen": a.listen})
 	})
 	mux.HandleFunc("PUT /v1/desired", func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		a.puts++
+		fail := a.failPut
+		a.mu.Unlock()
+		if fail {
+			http.Error(w, "agent down", http.StatusInternalServerError)
+			return
+		}
 		var st desired.State
 		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)

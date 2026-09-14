@@ -91,23 +91,26 @@ type Group struct {
 	Protocols          []string
 	QuotaBytes         int64
 	ExpireDefaultHours int
+	QuotaReset         string
 }
 
 type User struct {
-	ID          uuid.UUID
-	GroupID     uuid.UUID
-	DisplayName string
-	VlessUUID   string     `json:"-"`
-	Hy2Password string     `json:"-"`
-	TTUser      string     `json:"-"`
-	TTPassword  string     `json:"-"`
-	Upload      int64
-	Download    int64
-	Total       int64
-	Expire      *time.Time
-	Status      string
-	SubToken    string `json:"-"`
-	Note        string
+	ID               uuid.UUID
+	GroupID          uuid.UUID
+	DisplayName      string
+	VlessUUID        string `json:"-"`
+	Hy2Password      string `json:"-"`
+	TTUser           string `json:"-"`
+	TTPassword       string `json:"-"`
+	Upload           int64
+	Download         int64
+	Total            int64
+	Expire           *time.Time
+	Status           string
+	SubToken         string `json:"-"`
+	Note             string
+	QuotaReset       string
+	QuotaPeriodStart *time.Time
 }
 
 type AuditEvent struct {
@@ -120,12 +123,12 @@ type AuditEvent struct {
 }
 
 const userCols = `id, group_id, display_name, vless_uuid, hy2_password, tt_user, tt_password,
-			upload, download, total, expire, status, sub_token, note`
+			upload, download, total, expire, status, sub_token, note, quota_reset, quota_period_start`
 
 func scanUser(sc interface{ Scan(dest ...any) error }) (User, error) {
 	var u User
 	err := sc.Scan(&u.ID, &u.GroupID, &u.DisplayName, &u.VlessUUID, &u.Hy2Password, &u.TTUser, &u.TTPassword,
-		&u.Upload, &u.Download, &u.Total, &u.Expire, &u.Status, &u.SubToken, &u.Note)
+		&u.Upload, &u.Download, &u.Total, &u.Expire, &u.Status, &u.SubToken, &u.Note, &u.QuotaReset, &u.QuotaPeriodStart)
 	return u, err
 }
 
@@ -144,18 +147,22 @@ type Node struct {
 }
 
 func (s *Store) CreateGroup(ctx context.Context, name string, protocols []string, quotaBytes int64, expireHours int) (Group, error) {
-	g := Group{ID: uuid.New(), Name: name, Protocols: protocols, QuotaBytes: quotaBytes, ExpireDefaultHours: expireHours}
+	return s.CreateGroupReset(ctx, name, protocols, quotaBytes, expireHours, "")
+}
+
+func (s *Store) CreateGroupReset(ctx context.Context, name string, protocols []string, quotaBytes int64, expireHours int, quotaReset string) (Group, error) {
+	g := Group{ID: uuid.New(), Name: name, Protocols: protocols, QuotaBytes: quotaBytes, ExpireDefaultHours: expireHours, QuotaReset: quotaReset}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO groups (id, name, protocols, quota_bytes, expire_default_hours) VALUES ($1,$2,$3,$4,$5)`,
-		g.ID, g.Name, g.Protocols, g.QuotaBytes, g.ExpireDefaultHours,
+		`INSERT INTO groups (id, name, protocols, quota_bytes, expire_default_hours, quota_reset) VALUES ($1,$2,$3,$4,$5,$6)`,
+		g.ID, g.Name, g.Protocols, g.QuotaBytes, g.ExpireDefaultHours, g.QuotaReset,
 	)
 	return g, err
 }
 
 func (s *Store) UpdateGroup(ctx context.Context, g Group) error {
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE groups SET name=$2, protocols=$3, quota_bytes=$4, expire_default_hours=$5 WHERE id=$1`,
-		g.ID, g.Name, g.Protocols, g.QuotaBytes, g.ExpireDefaultHours,
+		UPDATE groups SET name=$2, protocols=$3, quota_bytes=$4, expire_default_hours=$5, quota_reset=$6 WHERE id=$1`,
+		g.ID, g.Name, g.Protocols, g.QuotaBytes, g.ExpireDefaultHours, g.QuotaReset,
 	)
 	if err != nil {
 		return err
@@ -167,7 +174,7 @@ func (s *Store) UpdateGroup(ctx context.Context, g Group) error {
 }
 
 func (s *Store) ListGroups(ctx context.Context) ([]Group, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, name, protocols, quota_bytes, expire_default_hours FROM groups ORDER BY name`)
+	rows, err := s.pool.Query(ctx, `SELECT id, name, protocols, quota_bytes, expire_default_hours, quota_reset FROM groups ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +182,7 @@ func (s *Store) ListGroups(ctx context.Context) ([]Group, error) {
 	var out []Group
 	for rows.Next() {
 		var g Group
-		if err := rows.Scan(&g.ID, &g.Name, &g.Protocols, &g.QuotaBytes, &g.ExpireDefaultHours); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Protocols, &g.QuotaBytes, &g.ExpireDefaultHours, &g.QuotaReset); err != nil {
 			return nil, err
 		}
 		out = append(out, g)
@@ -190,10 +197,10 @@ func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO users (
 			id, group_id, display_name, vless_uuid, hy2_password, tt_user, tt_password,
-			upload, download, total, expire, status, sub_token, note
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+			upload, download, total, expire, status, sub_token, note, quota_reset, quota_period_start
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		u.ID, u.GroupID, u.DisplayName, u.VlessUUID, u.Hy2Password, u.TTUser, u.TTPassword,
-		u.Upload, u.Download, u.Total, u.Expire, u.Status, u.SubToken, u.Note,
+		u.Upload, u.Download, u.Total, u.Expire, u.Status, u.SubToken, u.Note, u.QuotaReset, u.QuotaPeriodStart,
 	)
 	return u, err
 }
@@ -244,9 +251,11 @@ func (s *Store) SetUserStatus(ctx context.Context, id uuid.UUID, status string) 
 
 func (s *Store) UpdateUser(ctx context.Context, u User) error {
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE users SET display_name=$2, note=$3, status=$4, upload=$5, download=$6, total=$7, expire=$8
+		UPDATE users SET display_name=$2, note=$3, status=$4, upload=$5, download=$6, total=$7, expire=$8,
+			quota_reset=$9, quota_period_start=$10
 		WHERE id=$1`,
 		u.ID, u.DisplayName, u.Note, u.Status, u.Upload, u.Download, u.Total, u.Expire,
+		u.QuotaReset, u.QuotaPeriodStart,
 	)
 	if err != nil {
 		return err
@@ -540,8 +549,8 @@ func (s *Store) UsersInGroup(ctx context.Context, groupID uuid.UUID) ([]User, er
 
 func (s *Store) Group(ctx context.Context, id uuid.UUID) (Group, error) {
 	var g Group
-	err := s.pool.QueryRow(ctx, `SELECT id, name, protocols, quota_bytes, expire_default_hours FROM groups WHERE id=$1`, id).Scan(
-		&g.ID, &g.Name, &g.Protocols, &g.QuotaBytes, &g.ExpireDefaultHours,
+	err := s.pool.QueryRow(ctx, `SELECT id, name, protocols, quota_bytes, expire_default_hours, quota_reset FROM groups WHERE id=$1`, id).Scan(
+		&g.ID, &g.Name, &g.Protocols, &g.QuotaBytes, &g.ExpireDefaultHours, &g.QuotaReset,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Group{}, ErrNotFound
@@ -670,4 +679,21 @@ func (s *Store) ApplyTraffic(ctx context.Context, nodeID, userID uuid.UUID, sour
 		return 0, 0, User{}, err
 	}
 	return addedUp, addedDown, u, nil
+}
+
+// ResetQuotaPeriod moves quota_period_start. When zeroCounters is true, upload/download
+// become 0. traffic_cursor is left alone so the next stats poll only credits the delta.
+func (s *Store) ResetQuotaPeriod(ctx context.Context, id uuid.UUID, start time.Time, zeroCounters bool) error {
+	q := `UPDATE users SET quota_period_start=$2 WHERE id=$1`
+	if zeroCounters {
+		q = `UPDATE users SET upload=0, download=0, quota_period_start=$2 WHERE id=$1`
+	}
+	tag, err := s.pool.Exec(ctx, q, id, start)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

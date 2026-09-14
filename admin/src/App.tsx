@@ -6,6 +6,7 @@ type Group = {
   Protocols: string[];
   QuotaBytes: number;
   ExpireDefaultHours: number;
+  QuotaReset?: string;
 };
 type UserRow = {
   ID: string;
@@ -17,6 +18,8 @@ type UserRow = {
   Total: number;
   Expire: string | null;
   Note: string;
+  QuotaReset?: string;
+  QuotaPeriodStart?: string | null;
   sub_url: string;
   import_url: string;
 };
@@ -134,6 +137,31 @@ function hoursLabel(h: number): string {
   if (h % 24 === 0) return `${h / 24} дн.`;
   return `${h} ч.`;
 }
+function quotaResetLabel(v: string | undefined): string {
+  if (v === "day") return "сутки";
+  if (v === "week") return "неделя";
+  if (v === "month") return "месяц";
+  return "без сброса";
+}
+function QuotaResetSelect({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label>
+      Сброс квоты
+      <select value={value || ""} onChange={(e) => onChange(e.target.value)}>
+        <option value="">без сброса</option>
+        <option value="day">сутки (00:00 UTC)</option>
+        <option value="week">неделя (пн 00:00 UTC)</option>
+        <option value="month">месяц (1-е 00:00 UTC)</option>
+      </select>
+    </label>
+  );
+}
 function expireLabel(rfc: string | null): string {
   if (!rfc) return "без срока";
   const d = new Date(rfc);
@@ -143,6 +171,18 @@ function expireLabel(rfc: string | null): string {
   const hours = Math.ceil(ms / 3600000);
   if (hours < 24) return `${hours} ч.`;
   return `${Math.ceil(hours / 24)} дн.`;
+}
+function quotaLow(u: UserRow): boolean {
+  if (!u.Total) return false;
+  const used = u.Upload + u.Download;
+  return used >= u.Total * 0.9 && used < u.Total;
+}
+function expireSoon(u: UserRow): boolean {
+  if (!u.Expire) return false;
+  const t = Date.parse(u.Expire);
+  if (!Number.isFinite(t)) return false;
+  const left = t - Date.now();
+  return left > 0 && left <= 24 * 3600 * 1000;
 }
 function statusPill(status: string): { cls: string; text: string } {
   switch (status) {
@@ -203,9 +243,17 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     onUnauthorized?.();
   }
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: text.slice(0, 200) };
+    }
+  }
   if (!res.ok) {
-    throw new Error(data?.error || res.statusText);
+    const err = data && typeof data === "object" && "error" in data ? String((data as { error: unknown }).error) : res.statusText;
+    throw new Error(err || res.statusText);
   }
   return data as T;
 }
@@ -806,7 +854,7 @@ function Users({ onError }: { onError: (s: string) => void }) {
           <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
             {groups.map((g) => (
               <option key={g.ID} value={g.ID}>
-                {g.Name} · {hoursLabel(g.ExpireDefaultHours)}
+                {g.Name} · {hoursLabel(g.ExpireDefaultHours)} · {quotaResetLabel(g.QuotaReset)}
               </option>
             ))}
           </select>
@@ -871,6 +919,7 @@ function Users({ onError }: { onError: (s: string) => void }) {
               const st = statusPill(u.Status);
               const quotaDone = u.Total > 0 && u.Upload + u.Download >= u.Total;
               const expired = u.Status === "active" && (expireLabel(u.Expire) === "истёк" || quotaDone);
+              const low = u.Status === "active" && !expired && (quotaLow(u) || expireSoon(u));
               return (
                 <tr key={u.ID}>
                   <td>
@@ -879,13 +928,14 @@ function Users({ onError }: { onError: (s: string) => void }) {
                   </td>
                   <td className="muted">{groups.find((g) => g.ID === u.GroupID)?.Name || "—"}</td>
                   <td>
-                    <span className={`pill ${expired ? "warn" : st.cls}`}>
-                      {expired ? (quotaDone ? "квота" : "истёк") : st.text}
+                    <span className={`pill ${expired || low ? "warn" : st.cls}`}>
+                      {expired ? (quotaDone ? "квота" : "истёк") : low ? "мало" : st.text}
                     </span>
                   </td>
                   <td className="muted">
                     {bytesToGiB(u.Upload + u.Download)}
                     {u.Total ? ` / ${bytesToGiB(u.Total)}` : " / ∞"} GiB
+                    {u.QuotaReset ? ` · ${quotaResetLabel(u.QuotaReset)}` : ""}
                   </td>
                   <td className="muted">{expireLabel(u.Expire)}</td>
                   <td>
@@ -920,6 +970,54 @@ function Users({ onError }: { onError: (s: string) => void }) {
   );
 }
 
+function SharePanel({
+  subUrl,
+  importUrl,
+  onCopy,
+  copied,
+}: {
+  subUrl: string;
+  importUrl?: string;
+  onCopy: (text: string, label: string) => void;
+  copied: string;
+}) {
+  const [qr, setQr] = useState("");
+  useEffect(() => {
+    let cancel = false;
+    import("qrcode")
+      .then((mod) => mod.toDataURL(subUrl, { width: 192, margin: 1, color: { dark: "#12141a", light: "#ffffff" } }))
+      .then((url) => {
+        if (!cancel) setQr(url);
+      })
+      .catch(() => {
+        if (!cancel) setQr("");
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [subUrl]);
+  return (
+    <div className="share">
+      {qr ? <img src={qr} width={192} height={192} alt="QR подписки" /> : null}
+      <div className="grid">
+        <div className="muted">{subUrl}</div>
+        {importUrl ? <div className="muted">{importUrl}</div> : null}
+        {copied ? <p className="ok">Скопировано: {copied}</p> : null}
+        <div className="row">
+          <button type="button" className="primary" onClick={() => onCopy(subUrl, "URL подписки")}>
+            Копировать URL
+          </button>
+          {importUrl ? (
+            <button type="button" onClick={() => onCopy(importUrl, "deeplink")}>
+              Копировать import
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function UserDetail({
   u,
   onError,
@@ -934,12 +1032,14 @@ function UserDetail({
   const [display, setDisplay] = useState(u.DisplayName);
   const [note, setNote] = useState(u.Note || "");
   const [quotaGiB, setQuotaGiB] = useState(bytesToGiB(u.Total));
+  const [quotaReset, setQuotaReset] = useState(u.QuotaReset || "");
   const [copied, setCopied] = useState("");
   useEffect(() => {
     setDisplay(u.DisplayName);
     setNote(u.Note || "");
     setQuotaGiB(bytesToGiB(u.Total));
-  }, [u.ID, u.DisplayName, u.Note, u.Total]);
+    setQuotaReset(u.QuotaReset || "");
+  }, [u.ID, u.DisplayName, u.Note, u.Total, u.QuotaReset]);
 
   async function copyText(text: string, label: string) {
     try {
@@ -953,14 +1053,15 @@ function UserDetail({
 
   return (
     <div className="card grid" style={{ marginTop: 12 }}>
-      <div className="muted">{u.Status === "revoked" ? "Отозван — старый URL даёт 404." : u.sub_url}</div>
-      {u.Status !== "revoked" && u.import_url ? (
-        <div className="muted">deeplink: {u.import_url}</div>
-      ) : null}
-      {copied ? <p className="ok">Скопировано: {copied}</p> : null}
+      {u.Status !== "revoked" ? (
+        <SharePanel subUrl={u.sub_url} importUrl={u.import_url} onCopy={copyText} copied={copied} />
+      ) : (
+        <div className="muted">Отозван — старый URL даёт 404.</div>
+      )}
       <div className="muted">
         VLESS+Hy2: {bytesToGiB(u.Upload + u.Download)}
         {u.Total ? ` / ${bytesToGiB(u.Total)}` : " / ∞"} GiB (TrustTunnel не считается)
+        {u.QuotaReset ? ` · сброс ${quotaResetLabel(u.QuotaReset)}` : ""}
       </div>
       <div className="row">
         <label>
@@ -975,6 +1076,7 @@ function UserDetail({
           Квота GiB
           <input value={quotaGiB} onChange={(e) => setQuotaGiB(e.target.value)} style={{ width: 88 }} />
         </label>
+        <QuotaResetSelect value={quotaReset} onChange={setQuotaReset} />
         <button
           type="button"
           onClick={async () => {
@@ -985,6 +1087,7 @@ function UserDetail({
                   display_name: display,
                   note,
                   total: giBToBytes(quotaGiB),
+                  quota_reset: quotaReset,
                 }),
               });
               await onReload();
@@ -1036,16 +1139,6 @@ function UserDetail({
         >
           Без срока
         </button>
-        {u.Status !== "revoked" ? (
-          <button type="button" onClick={() => void copyText(u.sub_url, "URL подписки")}>
-            Копировать URL
-          </button>
-        ) : null}
-        {u.Status !== "revoked" && u.import_url ? (
-          <button type="button" onClick={() => void copyText(u.import_url, "deeplink")}>
-            Копировать import
-          </button>
-        ) : null}
         {u.Status !== "revoked" ? (
           <button
             type="button"
@@ -1131,6 +1224,7 @@ function Groups({ onError }: { onError: (s: string) => void }) {
   const [name, setName] = useState("");
   const [quotaGiB, setQuotaGiB] = useState("0");
   const [expire, setExpire] = useState<"none" | "1d" | "7d">("none");
+  const [quotaReset, setQuotaReset] = useState("");
   const [protocols, setProtocols] = useState<string[]>(["vless", "hy2", "tt"]);
 
   async function load() {
@@ -1158,11 +1252,13 @@ function Groups({ onError }: { onError: (s: string) => void }) {
                 protocols,
                 quota_bytes: giBToBytes(quotaGiB),
                 expire_default_hours: expire === "1d" ? 24 : expire === "7d" ? 168 : 0,
+                quota_reset: quotaReset,
               }),
             });
             setName("");
             setQuotaGiB("0");
             setExpire("none");
+            setQuotaReset("");
             setProtocols(["vless", "hy2", "tt"]);
             await load();
           } catch (err) {
@@ -1171,7 +1267,9 @@ function Groups({ onError }: { onError: (s: string) => void }) {
         }}
       >
         <h2>Новая группа</h2>
-        <p className="muted">Срок по умолчанию — сутки или неделя для новых пользователей, не привязка к протоколу.</p>
+        <p className="muted">
+          Срок — когда пропадёт доступ. Сброс квоты — обнуление счётчика VLESS+Hy2 на границе UTC; TrustTunnel не считается.
+        </p>
         <label>
           Имя
           <input value={name} onChange={(e) => setName(e.target.value)} required />
@@ -1194,6 +1292,7 @@ function Groups({ onError }: { onError: (s: string) => void }) {
             <option value="7d">неделя</option>
           </select>
         </label>
+        <QuotaResetSelect value={quotaReset} onChange={setQuotaReset} />
         <button className="primary" type="submit">
           Создать
         </button>
@@ -1227,6 +1326,7 @@ function GroupRow({
       : "3",
   );
   const [protocols, setProtocols] = useState(g.Protocols || ["vless", "hy2", "tt"]);
+  const [quotaReset, setQuotaReset] = useState(g.QuotaReset || "");
   useEffect(() => {
     setName(g.Name);
     setQuotaGiB(bytesToGiB(g.QuotaBytes));
@@ -1234,6 +1334,7 @@ function GroupRow({
       g.ExpireDefaultHours === 24 ? "1d" : g.ExpireDefaultHours === 168 ? "7d" : g.ExpireDefaultHours ? "custom" : "none",
     );
     setProtocols(g.Protocols || ["vless", "hy2", "tt"]);
+    setQuotaReset(g.QuotaReset || "");
   }, [g]);
 
   function hours(): number {
@@ -1247,13 +1348,16 @@ function GroupRow({
     name !== g.Name ||
     giBToBytes(quotaGiB) !== g.QuotaBytes ||
     hours() !== (g.ExpireDefaultHours || 0) ||
+    (quotaReset || "") !== (g.QuotaReset || "") ||
     JSON.stringify([...(protocols || [])].sort()) !== JSON.stringify([...(g.Protocols || [])].sort());
 
   return (
     <div>
       <div className="row" style={{ marginBottom: 8 }}>
         <input value={name} onChange={(e) => setName(e.target.value)} />
-        <span className="muted">{hoursLabel(g.ExpireDefaultHours)}</span>
+        <span className="muted">
+          {hoursLabel(g.ExpireDefaultHours)} · {quotaResetLabel(g.QuotaReset)}
+        </span>
       </div>
       <ProtocolChecks value={protocols} onChange={setProtocols} />
       <div className="row" style={{ marginTop: 8 }}>
@@ -1276,6 +1380,7 @@ function GroupRow({
             <input value={customDays} onChange={(e) => setCustomDays(e.target.value)} style={{ width: 72 }} />
           </label>
         ) : null}
+        <QuotaResetSelect value={quotaReset} onChange={setQuotaReset} />
         <button
           type="button"
           onClick={async () => {
@@ -1287,6 +1392,7 @@ function GroupRow({
                   protocols,
                   quota_bytes: giBToBytes(quotaGiB),
                   expire_default_hours: hours(),
+                  quota_reset: quotaReset,
                 }),
               });
               await onReload();
@@ -1317,6 +1423,17 @@ function GroupRow({
   );
 }
 
+const REALITY_PRESETS = [
+  { id: "cloudflare", label: "Cloudflare", dest: "www.cloudflare.com:443", sni: "www.cloudflare.com" },
+  { id: "apple", label: "Apple", dest: "www.apple.com:443", sni: "www.apple.com" },
+  { id: "microsoft", label: "Microsoft", dest: "www.microsoft.com:443", sni: "www.microsoft.com" },
+] as const;
+
+function realityPresetId(dest: string, sni: string): string {
+  const hit = REALITY_PRESETS.find((p) => p.dest === dest && p.sni === sni);
+  return hit?.id ?? "custom";
+}
+
 function RealitySettings({ onError }: { onError: (s: string) => void }) {
   const [dest, setDest] = useState("www.cloudflare.com:443");
   const [sni, setSni] = useState("www.cloudflare.com");
@@ -1332,6 +1449,8 @@ function RealitySettings({ onError }: { onError: (s: string) => void }) {
       })
       .catch((e) => onError(catchErr(e, "настройки")));
   }, [onError]);
+
+  const preset = realityPresetId(dest, sni);
 
   return (
     <form
@@ -1354,9 +1473,30 @@ function RealitySettings({ onError }: { onError: (s: string) => void }) {
     >
       <h2>REALITY dest / SNI</h2>
       <p className="muted">
-        Куда Xray стучится при handshake. Не hostname ноды. Не сканер — вписываете сами. Ключи{" "}
+        Куда Xray стучится при handshake. Не hostname ноды. Не сканер — пресет или своё. Ключи{" "}
         {keysReady ? "уже есть" : "появятся при первом Apply"}.
       </p>
+      <label>
+        Пресет
+        <select
+          value={preset}
+          onChange={(e) => {
+            const id = e.target.value;
+            const p = REALITY_PRESETS.find((x) => x.id === id);
+            if (p) {
+              setDest(p.dest);
+              setSni(p.sni);
+            }
+          }}
+        >
+          {REALITY_PRESETS.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+          <option value="custom">своё</option>
+        </select>
+      </label>
       <label>
         dest (host:port)
         <input value={dest} onChange={(e) => setDest(e.target.value)} autoComplete="off" />
