@@ -41,6 +41,7 @@ type Config struct {
 	SessionSecret string
 	PublicSubBase string
 	AdminDir      string
+	AlertWebhook  string
 }
 
 type Server struct {
@@ -56,6 +57,8 @@ type Server struct {
 	loginFails   map[string][]time.Time
 	healthMu     sync.Mutex
 	healthByNode map[uuid.UUID]healthSnap
+	alertMu      sync.Mutex
+	alertSent    map[string]alertSent
 }
 
 type healthSnap struct {
@@ -75,6 +78,7 @@ func New(st *store.Store, cfg Config) *Server {
 		entitled:     map[uuid.UUID]bool{},
 		loginFails:   map[string][]time.Time{},
 		healthByNode: map[uuid.UUID]healthSnap{},
+		alertSent:    map[string]alertSent{},
 	}
 	s.routes()
 	return s
@@ -91,6 +95,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/overview", s.withAuth(s.overview))
 	s.mux.HandleFunc("GET /v1/settings", s.withAuth(s.getSettings))
 	s.mux.HandleFunc("PATCH /v1/settings", s.withAuth(s.patchSettings))
+	s.mux.HandleFunc("POST /v1/alerts/test", s.withAuth(s.testAlert))
 	s.mux.HandleFunc("GET /v1/groups", s.withAuth(s.listGroups))
 	s.mux.HandleFunc("POST /v1/groups", s.withAuth(s.createGroup))
 	s.mux.HandleFunc("PATCH /v1/groups/{id}", s.withAuth(s.patchGroup))
@@ -117,6 +122,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/users/{id}/preview", s.withAuth(s.previewUser))
 	s.mux.HandleFunc("GET /sub/{token}", s.subscription)
 	s.mux.HandleFunc("GET /privacy", s.privacyPolicy)
+	s.mux.HandleFunc("GET /support", s.supportPage)
 	s.mux.HandleFunc("GET /gw/v1/service", s.goodwinService)
 	s.mux.HandleFunc("GET /gw/v1/geo/manifest", s.geoManifest)
 	s.mux.HandleFunc("GET /gw/v1/geo/packs/{id}", s.geoPack)
@@ -128,12 +134,23 @@ func (s *Server) routes() {
 //go:embed privacy.html
 var privacyHTML []byte
 
+//go:embed support.html
+var supportHTML []byte
+
 func (s *Server) privacyPolicy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(privacyHTML)
+}
+
+func (s *Server) supportPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(supportHTML)
 }
 
 func (s *Server) goodwinService(w http.ResponseWriter, r *http.Request) {
@@ -155,10 +172,32 @@ func (s *Server) geoPack(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	w.Header().Set("ETag", `"`+meta.SHA256+`"`)
+	etag := `"` + meta.SHA256 + `"`
+	w.Header().Set("ETag", etag)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if ifNoneMatch(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+func ifNoneMatch(header, etag string) bool {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return false
+	}
+	for _, part := range strings.Split(header, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "W/") {
+			part = strings.TrimSpace(strings.TrimPrefix(part, "W/"))
+		}
+		if part == "*" || part == etag {
+			return true
+		}
+	}
+	return false
 }
 
 func corsOrigins(publicSubBase string) map[string]struct{} {
@@ -363,6 +402,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		nc[st]++
 		alerts = append(alerts, fleetAlerts(fn)...)
 	}
+	alerts = append(alerts, quotaAlerts(users)...)
 	var last any
 	if ev, err := s.store.LastAudit(ctx, "apply"); err == nil {
 		last = ev
@@ -437,24 +477,30 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		sni = reality.DefaultSNI
 	}
 	pub := s.settingValue(ctx, "reality_public")
+	hook := s.settingValue(ctx, "alert_webhook")
+	if hook == "" {
+		hook = strings.TrimSpace(s.cfg.AlertWebhook)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"reality_dest":   dest,
 		"reality_sni":    sni,
 		"reality_public": pub,
 		"keys_ready":     pub != "",
+		"alert_webhook":  hook,
 	})
 }
 
 func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RealityDest *string `json:"reality_dest"`
-		RealitySNI  *string `json:"reality_sni"`
+		RealityDest  *string `json:"reality_dest"`
+		RealitySNI   *string `json:"reality_sni"`
+		AlertWebhook *string `json:"alert_webhook"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if req.RealityDest == nil && req.RealitySNI == nil {
+	if req.RealityDest == nil && req.RealitySNI == nil && req.AlertWebhook == nil {
 		writeErr(w, http.StatusBadRequest, "no fields")
 		return
 	}
@@ -483,19 +529,39 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		sni = got
 	}
-	if err := s.store.SetSetting(ctx, "reality_dest", dest); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
+	if req.RealityDest != nil || req.RealitySNI != nil {
+		if err := s.store.SetSetting(ctx, "reality_dest", dest); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.store.SetSetting(ctx, "reality_sni", sni); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = s.store.Audit(ctx, "admin", "settings", nil, dest+" "+sni)
 	}
-	if err := s.store.SetSetting(ctx, "reality_sni", sni); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
+	hook := s.settingValue(ctx, "alert_webhook")
+	if hook == "" {
+		hook = strings.TrimSpace(s.cfg.AlertWebhook)
 	}
-	_ = s.store.Audit(ctx, "admin", "settings", nil, dest+" "+sni)
+	if req.AlertWebhook != nil {
+		got, err := parseWebhookURL(*req.AlertWebhook)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := s.store.SetSetting(ctx, "alert_webhook", got); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		hook = got
+		_ = s.store.Audit(ctx, "admin", "alert_webhook", nil, webhookAudit(got))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":           true,
-		"reality_dest": dest,
-		"reality_sni":  sni,
+		"ok":            true,
+		"reality_dest":  dest,
+		"reality_sni":   sni,
+		"alert_webhook": hook,
 	})
 }
 
@@ -723,7 +789,7 @@ func (s *Server) publicUser(u store.User) map[string]any {
 		"QuotaReset":       u.QuotaReset,
 		"QuotaPeriodStart": u.QuotaPeriodStart,
 		"sub_url":          subURL,
-		"import_url":       "goodwin://import?url=" + url.QueryEscape(subURL),
+		"import_url":       importDeeplink(subURL),
 	}
 }
 
@@ -842,7 +908,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"count":         len(created),
 		"sub_url":       lastURL,
-		"import_url":    "goodwin://import?url=" + url.QueryEscape(lastURL),
+		"import_url":    importDeeplink(lastURL),
 		"applied_nodes": applied,
 	}
 	if len(created) == 1 {
@@ -1032,7 +1098,7 @@ func (s *Server) rotateUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
 		"sub_url":    subURL,
-		"import_url": "goodwin://import?url=" + url.QueryEscape(subURL),
+		"import_url": importDeeplink(subURL),
 	})
 }
 
@@ -1360,15 +1426,21 @@ func (s *Server) setNodeStack(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "node")
 		return
 	}
+	if stack.NeedsHostname(spec.Families) && strings.TrimSpace(n.Hostname) == "" {
+		writeErr(w, http.StatusBadRequest, "hostname required for hy2/tt (Let's Encrypt SAN)")
+		return
+	}
 	n.Families = spec.Families
 	n.PortsJSON, _ = json.Marshal(spec.Ports)
 	if err := s.store.UpdateNode(r.Context(), n); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if _, _, err := s.applyStoredNode(r.Context(), n, true); err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"spec": spec, "apply_error": err.Error()})
-		return
+	if n.Status != "pending" && strings.TrimSpace(n.IPv4) != "" && strings.TrimSpace(n.AgentToken) != "" {
+		if _, _, err := s.applyStoredNode(r.Context(), n, true); err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"spec": spec, "apply_error": err.Error()})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, spec)
 }
@@ -1957,6 +2029,13 @@ func (s *Server) subURL(token string) string {
 		base = "http://127.0.0.1:8080"
 	}
 	return base + "/sub/" + token
+}
+
+func importDeeplink(subURL string) string {
+	if subURL == "" {
+		return ""
+	}
+	return "goodwin://import?url=" + url.QueryEscape(subURL)
 }
 
 func (s *Server) agentAlive(ctx context.Context, n store.Node) bool {

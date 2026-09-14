@@ -32,6 +32,7 @@ func main() {
 		SessionSecret: getenv("SESSION_SECRET", "dev-session-secret-change-me"),
 		PublicSubBase: getenv("PUBLIC_SUB_BASE", "http://127.0.0.1:8080"),
 		AdminDir:      getenv("ADMIN_DIR", ""),
+		AlertWebhook:  getenv("ALERT_WEBHOOK", ""),
 	})
 	addr := api.ParseListen(getenv("LISTEN", ":8080"))
 	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
@@ -43,6 +44,7 @@ func main() {
 	defer pollCancel()
 	go srv.CollectTrafficLoop(pollCtx, pollEvery)
 	go srv.SweepEntitlementLoop(pollCtx, pollEvery)
+	go srv.AlertLoop(pollCtx, pollEvery)
 	go func() {
 		log.Printf("plane listen %s", addr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

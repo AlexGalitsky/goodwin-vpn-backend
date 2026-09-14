@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -34,5 +35,9 @@ func TestPublicUserOmitsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(body, "/sub/tok-visible") {
 		t.Fatalf("missing sub url in %s", body)
+	}
+	wantImport := `goodwin://import?url=` + url.QueryEscape("https://saturn.example/sub/tok-visible")
+	if !strings.Contains(body, wantImport) {
+		t.Fatalf("missing import_url %q in %s", wantImport, body)
 	}
 }

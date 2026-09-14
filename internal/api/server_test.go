@@ -53,6 +53,25 @@ func TestAdminStaticDoesNotPanicOnRegister(t *testing.T) {
 	if !strings.Contains(string(html), "Политика конфиденциальности") {
 		t.Fatal("privacy body missing Russian section")
 	}
+
+	support, err := http.Get(ts.URL + "/support")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer support.Body.Close()
+	supportHTML, _ := io.ReadAll(support.Body)
+	if support.StatusCode != 200 {
+		t.Fatalf("support status %d", support.StatusCode)
+	}
+	if support.Header.Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("support content-type %q", support.Header.Get("Content-Type"))
+	}
+	if !strings.Contains(string(supportHTML), "GoodWin VPN Support") {
+		t.Fatalf("support body missing title: %q", supportHTML[:min(len(supportHTML), 120)])
+	}
+	if !strings.Contains(string(supportHTML), "Поддержка GoodWin VPN") {
+		t.Fatal("support body missing Russian section")
+	}
 }
 
 func TestCORSAllowlist(t *testing.T) {
@@ -136,6 +155,7 @@ func TestGoodwinService(t *testing.T) {
 		Version  int      `json:"version"`
 		Name     string   `json:"name"`
 		Privacy  string   `json:"privacy"`
+		Support  string   `json:"support"`
 		Features []string `json:"features"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
@@ -146,6 +166,9 @@ func TestGoodwinService(t *testing.T) {
 	}
 	if body.Privacy != "https://saturn.goodwin.website/privacy" {
 		t.Fatalf("privacy %q", body.Privacy)
+	}
+	if body.Support != "https://saturn.goodwin.website/support" {
+		t.Fatalf("support %q", body.Support)
 	}
 	if len(body.Features) != 1 || body.Features[0] != "geo-packs" {
 		t.Fatalf("features %v", body.Features)
@@ -221,6 +244,20 @@ func TestGeoPacksPublic(t *testing.T) {
 	}
 	if pack.ID != "ads" || len(pack.Suffixes) == 0 {
 		t.Fatalf("pack %+v", pack)
+	}
+
+	cached, err := http.NewRequest(http.MethodGet, ts.URL+meta.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached.Header.Set("If-None-Match", packRes.Header.Get("ETag"))
+	cachedRes, err := http.DefaultClient.Do(cached)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cachedRes.Body.Close()
+	if cachedRes.StatusCode != http.StatusNotModified {
+		t.Fatalf("If-None-Match status %d", cachedRes.StatusCode)
 	}
 
 	missing, err := http.Get(ts.URL + "/gw/v1/geo/packs/nope")

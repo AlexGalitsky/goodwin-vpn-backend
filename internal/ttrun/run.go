@@ -102,8 +102,8 @@ func WriteFile(path string, raw []byte, mode os.FileMode) error {
 	return os.WriteFile(path, raw, mode)
 }
 
-func InstallUnit(bin, workDir, vpnPath, hostsPath string) error {
-	unit := fmt.Sprintf(`[Unit]
+func UnitFile(bin, workDir, vpnPath, hostsPath string) string {
+	return fmt.Sprintf(`[Unit]
 Description=Goodwin TrustTunnel
 After=network-online.target
 Wants=network-online.target
@@ -119,7 +119,10 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 `, workDir, bin, vpnPath, hostsPath, sysd.Extra)
-	if err := os.WriteFile("/etc/systemd/system/goodwin-trusttunnel.service", []byte(unit), 0o644); err != nil {
+}
+
+func InstallUnit(bin, workDir, vpnPath, hostsPath string) error {
+	if err := os.WriteFile("/etc/systemd/system/goodwin-trusttunnel.service", []byte(UnitFile(bin, workDir, vpnPath, hostsPath)), 0o644); err != nil {
 		return err
 	}
 	cmds := [][]string{

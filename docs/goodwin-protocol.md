@@ -14,6 +14,7 @@
 |--------|------|--------|
 | `GET /sub/{token}` | token | share-ссылки; на **200** заголовок `Goodwin-VPN` |
 | `GET /privacy` | нет | HTML политики |
+| `GET /support` | нет | HTML поддержки (контакт оператора) |
 | `GET /gw/v1/service` | нет | каталог + `features` |
 | `GET /gw/v1/geo/manifest` | нет | паки |
 | `GET /gw/v1/geo/packs/{id}` | нет | JSON пака; неизвестный id → **404** |

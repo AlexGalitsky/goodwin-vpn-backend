@@ -2,6 +2,7 @@ package execcmd
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,22 @@ func TestRunKillsProcessGroup(t *testing.T) {
 	}
 	if time.Since(start) > 3*time.Second {
 		t.Fatalf("process group still running after %s", time.Since(start))
+	}
+}
+
+func TestRunKillsProcessGroupChildren(t *testing.T) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Skip("pgrep not available")
+	}
+	// Unique argv so pgrep cannot match this test binary. sh stays parent of sleep.
+	_, err := Run(context.Background(), "sleep 91 & wait", 400*time.Millisecond, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	out, _ := exec.Command("pgrep", "-f", "sleep 91").Output()
+	if ids := strings.TrimSpace(string(out)); ids != "" {
+		t.Fatalf("child still running after process-group kill: %s", ids)
 	}
 }
 

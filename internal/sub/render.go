@@ -235,6 +235,7 @@ func ServiceDocumentFor(publicSubBase string) ServiceDocument {
 	}
 	if origin := PublicHTTPSOrigin(publicSubBase); origin != "" {
 		doc.Privacy = origin + "/privacy"
+		doc.Support = origin + "/support"
 	}
 	return doc
 }

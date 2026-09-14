@@ -88,6 +88,26 @@ func NeedsHostname(families []string) bool {
 	return HasFamily(families, FamilyHy2) || HasFamily(families, FamilyTT)
 }
 
+// DetectPreset maps stored families+ports back to a named preset.
+// max and tt-first share families; ports decide.
+func DetectPreset(families []string, ports Ports) string {
+	vless := HasFamily(families, FamilyVLESS)
+	hy2 := HasFamily(families, FamilyHy2)
+	tt := HasFamily(families, FamilyTT)
+	switch {
+	case vless && !hy2 && !tt:
+		return "stealth"
+	case hy2 && !vless && !tt:
+		return "hy2"
+	case tt && !vless && !hy2:
+		return "tt"
+	case vless && hy2 && tt && ports.TT == 443 && (ports.VlessTCP == 8443 || ports.Hy2UDP == 8443):
+		return "tt-first"
+	default:
+		return "max"
+	}
+}
+
 func Validate(spec Spec) error {
 	vless := HasFamily(spec.Families, FamilyVLESS)
 	hy2 := HasFamily(spec.Families, FamilyHy2)

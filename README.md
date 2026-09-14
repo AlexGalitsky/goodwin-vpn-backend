@@ -17,7 +17,7 @@ Admin: http://127.0.0.1:5173 password `change-me`.
 
 Dev user after seed: `http://127.0.0.1:8080/sub/dev-sub-token` (404 until a node is enrolled and attached to group `dev`). The Flutter app **rejects http://** — for a real import set `PUBLIC_SUB_BASE=https://…`.
 
-Public privacy policy (no auth): `GET /privacy`. Catalog: `GET /gw/v1/service`. Geo packs (G3): `GET /gw/v1/geo/manifest` and `GET /gw/v1/geo/packs/ads` (no login). The Flutter app opens privacy from the catalog when a Goodwin subscription is imported, else Saturn.
+Public privacy policy (no auth): `GET /privacy`. Support (no auth): `GET /support`. Catalog: `GET /gw/v1/service`. Geo packs (G3): `GET /gw/v1/geo/manifest` and `GET /gw/v1/geo/packs/ads` (no login). The Flutter app opens privacy and support from the catalog when a Goodwin subscription is imported, else Saturn.
 
 Open control-plane: spec [`docs/goodwin-protocol.md`](./docs/goodwin-protocol.md) (client behaviour: [goodwin-vpn-client](https://github.com/AlexGalitsky/goodwin-vpn-client/blob/main/docs/goodwin-protocol.md)). Аудит 2026-09-13: [`docs/audit-2026-09-13.md`](./docs/audit-2026-09-13.md). План: [`docs/work-plan-2026-09-13.md`](./docs/work-plan-2026-09-13.md). HTTPS `GET /sub/{token}` adds `Goodwin-VPN: v1; base="https://…"`. Do not change the `/sub` body contract (404 ≠ empty 200). Allowlist: `internal/geo/allowlist/`; `node tools/build_geo_packs.mjs --check`.
 
@@ -105,7 +105,7 @@ curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/ma
 
 2. Groups: квота GiB и срок (сутки / неделя / без срока) для новых пользователей. Протоколы группы — чекбоксы.
 3. Users: срок при создании, «+ сутки / + неделя», новая ссылка (ротация), отзыв, удаление.
-4. Инструменты: exec на ноде и аудит. Exec не выключаем.
+4. Инструменты: dest/SNI, webhook админу, exec на ноде и аудит. Exec не выключаем.
 
 ## Operator console (P8)
 
@@ -123,21 +123,27 @@ curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/ma
 
 Daily `pg_dump` on the panel VPS (Saturn): systemd timer `goodwin-plane-pgdump.timer` (03:17 local). Dumps live in `/var/backups/goodwin-plane/plane-YYYYMMDD.sql.gz` (14 days). Bootstrap/install copies the script and enables the timer.
 
+Losing the DB means re-issuing REALITY keys, sub tokens, and traffic cursors.
+
 Manual dump:
 
 ```bash
 sudo node /opt/goodwin-vpn-plane/pg_dump_plane.mjs
 ```
 
-Restore onto a **copy** of the volume (not live Saturn until you have taken a fresh dump):
+Restore onto a **copy** database `plane_restore` (live `plane` is not touched):
 
 ```bash
-# stop plane so it is not writing
-sudo systemctl stop goodwin-vpn-plane
-# optional: snapshot the docker volume first
 sudo node /opt/goodwin-vpn-plane/pg_dump_plane.mjs --restore /var/backups/goodwin-plane/plane-YYYYMMDD.sql.gz
-sudo systemctl start goodwin-vpn-plane
+# inspect: docker compose -f /opt/goodwin-vpn-plane/docker-compose.yml exec -T db \
+#   psql -U plane -d plane_restore -c '\dt'
 ```
 
-The dump is the REALITY keys, sub tokens, and traffic cursors. Losing the DB means re-issuing keys and links.
+Replace live `plane` only after a fresh dump and a successful copy restore:
+
+```bash
+sudo systemctl stop goodwin-vpn-plane
+sudo node /opt/goodwin-vpn-plane/pg_dump_plane.mjs --restore /var/backups/goodwin-plane/plane-YYYYMMDD.sql.gz --i-mean-live
+sudo systemctl start goodwin-vpn-plane
+```
 

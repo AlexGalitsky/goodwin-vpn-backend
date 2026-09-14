@@ -65,8 +65,8 @@ func WriteFile(path string, raw []byte, mode os.FileMode) error {
 	return releasebin.WriteFile(path, raw, mode)
 }
 
-func InstallUnit(bin, cfgPath string) error {
-	unit := fmt.Sprintf(`[Unit]
+func UnitFile(bin, cfgPath string) string {
+	return fmt.Sprintf(`[Unit]
 Description=Goodwin Hysteria2
 After=network-online.target
 Wants=network-online.target
@@ -81,7 +81,10 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 `, bin, cfgPath, sysd.Extra)
-	if err := os.WriteFile("/etc/systemd/system/goodwin-hysteria.service", []byte(unit), 0o644); err != nil {
+}
+
+func InstallUnit(bin, cfgPath string) error {
+	if err := os.WriteFile("/etc/systemd/system/goodwin-hysteria.service", []byte(UnitFile(bin, cfgPath)), 0o644); err != nil {
 		return err
 	}
 	cmds := [][]string{

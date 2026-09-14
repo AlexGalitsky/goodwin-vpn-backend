@@ -34,6 +34,21 @@ func TestNeedsHostname(t *testing.T) {
 	}
 }
 
+func TestDetectPreset(t *testing.T) {
+	if got := DetectPreset([]string{FamilyVLESS}, DefaultPorts("stealth")); got != "stealth" {
+		t.Fatalf("stealth: %s", got)
+	}
+	if got := DetectPreset([]string{FamilyVLESS, FamilyHy2, FamilyTT}, DefaultPorts("max")); got != "max" {
+		t.Fatalf("max: %s", got)
+	}
+	if got := DetectPreset([]string{FamilyVLESS, FamilyHy2, FamilyTT}, DefaultPorts("tt-first")); got != "tt-first" {
+		t.Fatalf("tt-first: %s", got)
+	}
+	if got := DetectPreset([]string{FamilyHy2}, DefaultPorts("hy2")); got != "hy2" {
+		t.Fatalf("hy2: %s", got)
+	}
+}
+
 func TestNormalizeFamilies(t *testing.T) {
 	got, err := NormalizeFamilies([]string{" VLESS ", "hy2", "hy2", "tt"})
 	if err != nil {

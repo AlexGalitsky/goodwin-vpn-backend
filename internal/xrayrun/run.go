@@ -25,7 +25,7 @@ const (
 )
 
 var zipSHA256 = map[string]string{
-	"Xray-linux-64.zip":         "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae",
+	"Xray-linux-64.zip":        "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae",
 	"Xray-linux-arm64-v8a.zip": "4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c",
 }
 
@@ -110,8 +110,8 @@ func ReadPortFile(path string) int {
 	return n
 }
 
-func InstallUnit(bin, cfgPath string) error {
-	unit := fmt.Sprintf(`[Unit]
+func UnitFile(bin, cfgPath string) string {
+	return fmt.Sprintf(`[Unit]
 Description=Goodwin Xray (VLESS REALITY)
 After=network-online.target
 Wants=network-online.target
@@ -126,7 +126,10 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 `, bin, cfgPath, sysd.Extra)
-	if err := os.WriteFile("/etc/systemd/system/goodwin-xray.service", []byte(unit), 0o644); err != nil {
+}
+
+func InstallUnit(bin, cfgPath string) error {
+	if err := os.WriteFile("/etc/systemd/system/goodwin-xray.service", []byte(UnitFile(bin, cfgPath)), 0o644); err != nil {
 		return err
 	}
 	cmds := [][]string{

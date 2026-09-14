@@ -149,6 +149,9 @@ func TestServiceDocumentFor(t *testing.T) {
 	if got.Privacy != "https://saturn.goodwin.website/privacy" {
 		t.Fatalf("privacy %q", got.Privacy)
 	}
+	if got.Support != "https://saturn.goodwin.website/support" {
+		t.Fatalf("support %q", got.Support)
+	}
 	if got.Features == nil {
 		t.Fatal("features must be empty slice, not null")
 	}
@@ -158,6 +161,9 @@ func TestServiceDocumentFor(t *testing.T) {
 	httpDoc := ServiceDocumentFor("http://127.0.0.1:8080")
 	if httpDoc.Privacy != "" {
 		t.Fatalf("http origin must omit privacy: %q", httpDoc.Privacy)
+	}
+	if httpDoc.Support != "" {
+		t.Fatalf("http origin must omit support: %q", httpDoc.Support)
 	}
 	if httpDoc.Protocol != "goodwin-vpn" {
 		t.Fatal("catalog is still served on local http")

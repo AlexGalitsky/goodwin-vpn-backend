@@ -11,6 +11,7 @@ const certWarnDays = 14
 type OverviewAlert struct {
 	Level string `json:"level"`
 	Text  string `json:"text"`
+	Key   string `json:"-"`
 }
 
 type FleetNode struct {
@@ -64,15 +65,15 @@ func fleetAlerts(n FleetNode) []OverviewAlert {
 		if n.Status == "pending" {
 			return nil
 		}
-		return []OverviewAlert{{Level: "bad", Text: name + " офлайн"}}
+		return []OverviewAlert{{Level: "bad", Text: name + " офлайн", Key: "node:" + n.ID + ":offline"}}
 	}
 	if n.Status == "ready" && !n.XrayListen && !n.Hy2Listen && !n.TTListen {
-		out = append(out, OverviewAlert{Level: "bad", Text: name + " ядра не слушаются"})
+		out = append(out, OverviewAlert{Level: "bad", Text: name + " ядра не слушаются", Key: "listen:" + n.ID})
 	}
 	if n.DiskTotal > 0 {
 		pct := n.DiskUsed * 100 / n.DiskTotal
 		if pct >= 90 {
-			out = append(out, OverviewAlert{Level: "bad", Text: fmt.Sprintf("%s диск %d%%", name, pct)})
+			out = append(out, OverviewAlert{Level: "bad", Text: fmt.Sprintf("%s диск %d%%", name, pct), Key: "disk:" + n.ID})
 		}
 	}
 	for _, c := range n.Certs {
@@ -82,9 +83,9 @@ func fleetAlerts(n FleetNode) []OverviewAlert {
 		}
 		switch {
 		case c.DaysLeft < 0:
-			out = append(out, OverviewAlert{Level: "bad", Text: label + " сертификат истёк"})
+			out = append(out, OverviewAlert{Level: "bad", Text: label + " сертификат истёк", Key: "cert:" + label})
 		case c.DaysLeft < certWarnDays:
-			out = append(out, OverviewAlert{Level: "bad", Text: fmt.Sprintf("%s сертификат %d дней", label, c.DaysLeft)})
+			out = append(out, OverviewAlert{Level: "bad", Text: fmt.Sprintf("%s сертификат %d дней", label, c.DaysLeft), Key: "cert:" + label})
 		}
 	}
 	return out

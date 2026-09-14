@@ -23,6 +23,7 @@ type UserRow = {
   sub_url: string;
   import_url: string;
 };
+type NodePorts = { vless_tcp?: number; hy2_udp?: number; tt?: number };
 type NodeRow = {
   ID: string;
   Name: string;
@@ -33,6 +34,7 @@ type NodeRow = {
   Families: string[];
   applied_families?: string[];
   group_ids: string[];
+  ports?: NodePorts;
 };
 type AuditRow = {
   ID: string;
@@ -82,12 +84,20 @@ const FAMILIES = [
   { id: "tt", label: "TrustTunnel" },
 ] as const;
 
-function familyPreset(families: string[]): string {
+function familyPreset(families: string[], ports?: NodePorts): string {
   const set = new Set(families || []);
   if (set.size === 1 && set.has("vless")) return "stealth";
   if (set.size === 1 && set.has("hy2")) return "hy2";
   if (set.size === 1 && set.has("tt")) return "tt";
+  if ((ports?.tt ?? 0) === 443 && ((ports?.vless_tcp ?? 0) === 8443 || (ports?.hy2_udp ?? 0) === 8443)) {
+    return "tt-first";
+  }
   return "max";
+}
+
+function nodeDraftKey(n: NodeRow): string {
+  const groups = [...(n.group_ids || [])].sort().join(",");
+  return `${(n.Hostname || "").trim()}\0${familyPreset(n.Families || [], n.ports)}\0${groups}`;
 }
 
 function specForPreset(preset: string): { families: string[]; ports: Record<string, number> } {
@@ -310,6 +320,7 @@ export default function App() {
       {tab === "tools" && (
         <div className="grid">
           <RealitySettings onError={setErr} />
+          <AlertSettings onError={setErr} />
           <CollectTraffic onError={setErr} />
           <Exec onError={setErr} />
           <AuditLog onError={setErr} />
@@ -493,10 +504,15 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
   const [preset, setPreset] = useState("max");
   const [groupIds, setGroupIds] = useState<string[]>([]);
   const [applyLog, setApplyLog] = useState<Record<string, string>>({});
+  const [savedKeys, setSavedKeys] = useState<Record<string, string>>({});
 
   async function load() {
     try {
-      setNodes(await api("/v1/nodes"));
+      const list = await api<NodeRow[]>("/v1/nodes");
+      setNodes(list);
+      const keys: Record<string, string> = {};
+      for (const n of list) keys[n.ID] = nodeDraftKey(n);
+      setSavedKeys(keys);
       setGroups(await api("/v1/groups"));
     } catch (e) {
       onError(catchErr(e, "загрузка"));
@@ -528,6 +544,32 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
     } catch (e) {
       onError(catchErr(e, "создать"));
     }
+  }
+
+  function nodeDirty(n: NodeRow): boolean {
+    return savedKeys[n.ID] !== undefined && nodeDraftKey(n) !== savedKeys[n.ID];
+  }
+  const anyDirty = nodes.some(nodeDirty);
+
+  async function saveNode(n: NodeRow) {
+    onError("");
+    const spec = specForPreset(familyPreset(n.Families || [], n.ports));
+    await api(`/v1/nodes/${n.ID}`, {
+      method: "PATCH",
+      body: JSON.stringify({ hostname: n.Hostname || "" }),
+    });
+    const stackRes = await api<{ apply_error?: string }>(`/v1/nodes/${n.ID}/stack`, {
+      method: "PUT",
+      body: JSON.stringify(spec),
+    });
+    if (stackRes.apply_error) {
+      throw new Error(stackRes.apply_error);
+    }
+    await api(`/v1/nodes/${n.ID}/groups`, {
+      method: "PUT",
+      body: JSON.stringify({ group_ids: n.group_ids || [] }),
+    });
+    await load();
   }
 
   return (
@@ -582,14 +624,21 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
       <div className="card">
         <h2>Ноды</h2>
         <p className="muted">
-          Пользователь видит только ноды своей группы. После смены групп или стека — Apply. Мёртвый
-          agent пропадает из подписки. TrustTunnel в квоту не входит.
+          Пользователь видит только ноды своей группы. Сначала Сохранить, потом Apply — иначе на
+          ноду уедут старые группы. Неверный пресет чинится здесь, без удаления ноды. TrustTunnel в
+          квоту не входит.
         </p>
+        {anyDirty ? <p className="err">Есть несохранённые правки — Apply заблокирован.</p> : null}
         <div className="row" style={{ marginBottom: 12 }}>
           <button
             type="button"
+            disabled={anyDirty}
             onClick={async () => {
               onError("");
+              if (anyDirty) {
+                onError("Сначала сохраните правки нод");
+                return;
+              }
               try {
                 const res = await api<{ applied_nodes?: number; errors?: string[] }>(
                   "/v1/nodes/apply-all",
@@ -622,6 +671,8 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
           <tbody>
             {nodes.map((n) => {
               const st = statusPill(n.Status);
+              const dirty = nodeDirty(n);
+              const preset = familyPreset(n.Families || [], n.ports);
               return (
                 <tr key={n.ID}>
                   <td>
@@ -640,11 +691,13 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
                       style={{ marginTop: 4, width: "100%" }}
                     />
                     <select
-                      value={familyPreset(n.Families || [])}
+                      value={preset}
                       onChange={(e) => {
                         const spec = specForPreset(e.target.value);
                         setNodes((prev) =>
-                          prev.map((x) => (x.ID === n.ID ? { ...x, Families: spec.families } : x)),
+                          prev.map((x) =>
+                            x.ID === n.ID ? { ...x, Families: spec.families, ports: spec.ports } : x,
+                          ),
                         );
                       }}
                       style={{ marginTop: 4, width: "100%" }}
@@ -659,9 +712,15 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
                   </td>
                   <td>
                     <span className={`pill ${st.cls}`}>{st.text}</span>
+                    {dirty ? (
+                      <div>
+                        <span className="pill warn">не сохранено</span>
+                      </div>
+                    ) : null}
                   </td>
                   <td className="muted">
                     {(n.applied_families || n.Families || []).join(", ") || "—"}
+                    <div className="muted">{preset}</div>
                   </td>
                   <td>
                     <GroupChecks
@@ -677,34 +736,24 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
                       <button
                         type="button"
                         onClick={async () => {
-                          onError("");
                           try {
-                            await api(`/v1/nodes/${n.ID}/groups`, {
-                              method: "PUT",
-                              body: JSON.stringify({ group_ids: n.group_ids || [] }),
-                            });
-                            await api(`/v1/nodes/${n.ID}`, {
-                              method: "PATCH",
-                              body: JSON.stringify({ hostname: n.Hostname || "" }),
-                            });
-                            const spec = specForPreset(familyPreset(n.Families || []));
-                            await api(`/v1/nodes/${n.ID}/stack`, {
-                              method: "PUT",
-                              body: JSON.stringify(spec),
-                            });
-                            await load();
+                            await saveNode(n);
                           } catch (e) {
                             onError(catchErr(e, "группы/стек"));
                           }
                         }}
                       >
-                        Сохранить
+                        Сохранить{dirty ? " · не сохранено" : ""}
                       </button>
                       <button
                         type="button"
-                        disabled={n.Status === "pending"}
+                        disabled={n.Status === "pending" || dirty}
                         onClick={async () => {
                           onError("");
+                          if (dirty) {
+                            onError("Сначала сохраните правки ноды");
+                            return;
+                          }
                           try {
                             const res = await api<{ node_status: string; apply?: { detail?: string } }>(
                               `/v1/nodes/${n.ID}/apply`,
@@ -781,6 +830,7 @@ function Users({ onError }: { onError: (s: string) => void }) {
   const [filterGroup, setFilterGroup] = useState("all");
   const [preview, setPreview] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [shareId, setShareId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
   async function load() {
@@ -803,9 +853,9 @@ function Users({ onError }: { onError: (s: string) => void }) {
       const quotaDone = u.Total > 0 && u.Upload + u.Download >= u.Total;
       const expired = expireLabel(u.Expire) === "истёк";
       if (status === "expired") {
-        if (!expired) return false;
+        if (u.Status !== "active" || !expired) return false;
       } else if (status === "quota") {
-        if (!quotaDone) return false;
+        if (u.Status !== "active" || !quotaDone) return false;
       } else if (status !== "all" && u.Status !== status) {
         return false;
       }
@@ -820,7 +870,7 @@ function Users({ onError }: { onError: (s: string) => void }) {
     e.preventDefault();
     setCreating(true);
     try {
-      const res = await api<{ applied_nodes?: number }>("/v1/users", {
+      const res = await api<{ applied_nodes?: number; user?: { ID: string } }>("/v1/users", {
         method: "POST",
         body: JSON.stringify({
           group_id: groupId,
@@ -831,6 +881,7 @@ function Users({ onError }: { onError: (s: string) => void }) {
       });
       setName("");
       await load();
+      if (res.user?.ID) setShareId(res.user.ID);
       if (!res.applied_nodes) {
         onError("Пользователь создан, но ноды не обновились. Apply вручную — иначе в подписке не будет TrustTunnel.");
       }
@@ -903,51 +954,62 @@ function Users({ onError }: { onError: (s: string) => void }) {
             ))}
           </select>
         </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Имя</th>
-              <th>Группа</th>
-              <th>Статус</th>
-              <th>Трафик</th>
-              <th>Срок</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((u) => {
-              const st = statusPill(u.Status);
-              const quotaDone = u.Total > 0 && u.Upload + u.Download >= u.Total;
-              const expired = u.Status === "active" && (expireLabel(u.Expire) === "истёк" || quotaDone);
-              const low = u.Status === "active" && !expired && (quotaLow(u) || expireSoon(u));
-              return (
-                <tr key={u.ID}>
-                  <td>
-                    <strong>{u.DisplayName || u.ID.slice(0, 8)}</strong>
-                    {u.Note ? <div className="muted">{u.Note}</div> : null}
-                  </td>
-                  <td className="muted">{groups.find((g) => g.ID === u.GroupID)?.Name || "—"}</td>
-                  <td>
-                    <span className={`pill ${expired || low ? "warn" : st.cls}`}>
-                      {expired ? (quotaDone ? "квота" : "истёк") : low ? "мало" : st.text}
-                    </span>
-                  </td>
-                  <td className="muted">
-                    {bytesToGiB(u.Upload + u.Download)}
-                    {u.Total ? ` / ${bytesToGiB(u.Total)}` : " / ∞"} GiB
-                    {u.QuotaReset ? ` · ${quotaResetLabel(u.QuotaReset)}` : ""}
-                  </td>
-                  <td className="muted">{expireLabel(u.Expire)}</td>
-                  <td>
-                    <button type="button" onClick={() => setOpenId(openId === u.ID ? null : u.ID)}>
-                      {openId === u.ID ? "Свернуть" : "Открыть"}
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        {filtered.length === 0 ? (
+          <p className="muted">Никого нет по фильтру.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Имя</th>
+                <th>Группа</th>
+                <th>Статус</th>
+                <th>Трафик</th>
+                <th>Срок</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((u) => {
+                const st = statusPill(u.Status);
+                const quotaDone = u.Total > 0 && u.Upload + u.Download >= u.Total;
+                const expired = u.Status === "active" && (expireLabel(u.Expire) === "истёк" || quotaDone);
+                const low = u.Status === "active" && !expired && (quotaLow(u) || expireSoon(u));
+                return (
+                  <tr key={u.ID}>
+                    <td>
+                      <strong>{u.DisplayName || u.ID.slice(0, 8)}</strong>
+                      {u.Note ? <div className="muted">{u.Note}</div> : null}
+                    </td>
+                    <td className="muted">{groups.find((g) => g.ID === u.GroupID)?.Name || "—"}</td>
+                    <td>
+                      <span className={`pill ${expired || low ? "warn" : st.cls}`}>
+                        {expired ? (quotaDone ? "квота" : "истёк") : low ? "мало" : st.text}
+                      </span>
+                    </td>
+                    <td className="muted">
+                      {bytesToGiB(u.Upload + u.Download)}
+                      {u.Total ? ` / ${bytesToGiB(u.Total)}` : " / ∞"} GiB
+                      {u.QuotaReset ? ` · ${quotaResetLabel(u.QuotaReset)}` : ""}
+                    </td>
+                    <td className="muted">{expireLabel(u.Expire)}</td>
+                    <td>
+                      <div className="row">
+                        {u.Status !== "revoked" ? (
+                          <button type="button" className="primary" onClick={() => setShareId(u.ID)}>
+                            Поделиться
+                          </button>
+                        ) : null}
+                        <button type="button" onClick={() => setOpenId(openId === u.ID ? null : u.ID)}>
+                          {openId === u.ID ? "Свернуть" : "Открыть"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
         {openId
           ? (() => {
               const u = users.find((x) => x.ID === openId);
@@ -958,6 +1020,7 @@ function Users({ onError }: { onError: (s: string) => void }) {
                   onError={onError}
                   onReload={load}
                   onPreview={setPreview}
+                  onShare={() => setShareId(u.ID)}
                 />
               );
             })()
@@ -965,6 +1028,74 @@ function Users({ onError }: { onError: (s: string) => void }) {
         {preview !== null ? (
           <pre>{preview || "(пусто — выкл., истёк срок, квота или нет готовых нод)"}</pre>
         ) : null}
+        {shareId
+          ? (() => {
+              const u = users.find((x) => x.ID === shareId);
+              if (!u || u.Status === "revoked") return null;
+              return (
+                <ShareSheet
+                  title={u.DisplayName || u.ID.slice(0, 8)}
+                  subUrl={u.sub_url}
+                  importUrl={u.import_url}
+                  onClose={() => setShareId(null)}
+                  onError={onError}
+                />
+              );
+            })()
+          : null}
+      </div>
+    </div>
+  );
+}
+
+function ShareSheet({
+  title,
+  subUrl,
+  importUrl,
+  onClose,
+  onError,
+}: {
+  title: string;
+  subUrl: string;
+  importUrl?: string;
+  onClose: () => void;
+  onError: (s: string) => void;
+}) {
+  const [copied, setCopied] = useState("");
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function copyText(text: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(label);
+      window.setTimeout(() => setCopied(""), 2000);
+    } catch (e) {
+      onError(catchErr(e, "копировать"));
+    }
+  }
+
+  return (
+    <div className="sheet-backdrop" onClick={onClose} role="presentation">
+      <div
+        className="sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="share-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <h2 id="share-title">Поделиться · {title}</h2>
+          <button type="button" onClick={onClose}>
+            Закрыть
+          </button>
+        </div>
+        <SharePanel subUrl={subUrl} importUrl={importUrl} onCopy={copyText} copied={copied} />
       </div>
     </div>
   );
@@ -998,10 +1129,22 @@ function SharePanel({
   }, [subUrl]);
   return (
     <div className="share">
-      {qr ? <img src={qr} width={192} height={192} alt="QR подписки" /> : null}
+      {qr ? <img src={qr} width={192} height={192} alt="QR подписки" /> : <p className="muted">QR…</p>}
       <div className="grid">
-        <div className="muted">{subUrl}</div>
-        {importUrl ? <div className="muted">{importUrl}</div> : null}
+        <label>
+          URL подписки
+          <div className="muted" style={{ wordBreak: "break-all" }}>
+            {subUrl}
+          </div>
+        </label>
+        {importUrl ? (
+          <label>
+            Import в приложение
+            <div className="muted" style={{ wordBreak: "break-all" }}>
+              {importUrl}
+            </div>
+          </label>
+        ) : null}
         {copied ? <p className="ok">Скопировано: {copied}</p> : null}
         <div className="row">
           <button type="button" className="primary" onClick={() => onCopy(subUrl, "URL подписки")}>
@@ -1023,17 +1166,18 @@ function UserDetail({
   onError,
   onReload,
   onPreview,
+  onShare,
 }: {
   u: UserRow;
   onError: (s: string) => void;
   onReload: () => Promise<void>;
   onPreview: (body: string) => void;
+  onShare: () => void;
 }) {
   const [display, setDisplay] = useState(u.DisplayName);
   const [note, setNote] = useState(u.Note || "");
   const [quotaGiB, setQuotaGiB] = useState(bytesToGiB(u.Total));
   const [quotaReset, setQuotaReset] = useState(u.QuotaReset || "");
-  const [copied, setCopied] = useState("");
   useEffect(() => {
     setDisplay(u.DisplayName);
     setNote(u.Note || "");
@@ -1041,20 +1185,12 @@ function UserDetail({
     setQuotaReset(u.QuotaReset || "");
   }, [u.ID, u.DisplayName, u.Note, u.Total, u.QuotaReset]);
 
-  async function copyText(text: string, label: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(label);
-      window.setTimeout(() => setCopied(""), 2000);
-    } catch (e) {
-      onError(catchErr(e, "копировать"));
-    }
-  }
-
   return (
     <div className="card grid" style={{ marginTop: 12 }}>
       {u.Status !== "revoked" ? (
-        <SharePanel subUrl={u.sub_url} importUrl={u.import_url} onCopy={copyText} copied={copied} />
+        <button type="button" className="primary" onClick={onShare} style={{ width: "fit-content" }}>
+          Поделиться
+        </button>
       ) : (
         <div className="muted">Отозван — старый URL даёт 404.</div>
       )}
@@ -1508,6 +1644,66 @@ function RealitySettings({ onError }: { onError: (s: string) => void }) {
       <button className="primary" type="submit">
         Сохранить
       </button>
+      {saved ? <p className="ok">{saved}</p> : null}
+    </form>
+  );
+}
+
+function AlertSettings({ onError }: { onError: (s: string) => void }) {
+  const [url, setUrl] = useState("");
+  const [saved, setSaved] = useState("");
+  useEffect(() => {
+    api<{ alert_webhook?: string }>("/v1/settings")
+      .then((s) => setUrl(s.alert_webhook || ""))
+      .catch((e) => onError(catchErr(e, "webhook")));
+  }, [onError]);
+  return (
+    <form
+      className="card grid"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setSaved("");
+        try {
+          const res = await api<{ alert_webhook?: string }>("/v1/settings", {
+            method: "PATCH",
+            body: JSON.stringify({ alert_webhook: url }),
+          });
+          setUrl(res.alert_webhook || "");
+          setSaved("Сохранено. Plane шлёт JSON раз в минуту, без повтора 6 ч.");
+        } catch (err) {
+          onError(catchErr(err, "сохранить webhook"));
+        }
+      }}
+    >
+      <h2>Алерты админу</h2>
+      <p className="muted">
+        HTTPS POST JSON с полями level, text, source: нода офлайн, сертификат меньше 14 дней, квота
+        90%. Не юзер-бот. Пусто — выкл. http://127.0.0.1 только для проверки.
+      </p>
+      <label>
+        Webhook URL
+        <input value={url} onChange={(e) => setUrl(e.target.value)} autoComplete="off" placeholder="https://…" />
+      </label>
+      <div className="row">
+        <button className="primary" type="submit">
+          Сохранить
+        </button>
+        <button
+          type="button"
+          disabled={!url.trim()}
+          onClick={async () => {
+            setSaved("");
+            try {
+              await api("/v1/alerts/test", { method: "POST", body: "{}" });
+              setSaved("Тест ушёл.");
+            } catch (err) {
+              onError(catchErr(err, "тест webhook"));
+            }
+          }}
+        >
+          Проверить
+        </button>
+      </div>
       {saved ? <p className="ok">{saved}</p> : null}
     </form>
   );

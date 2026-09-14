@@ -141,6 +141,86 @@ func TestApplyDisableExpireRevoke(t *testing.T) {
 	assertSub(t, s, old, http.StatusNotFound, true)
 }
 
+func TestCollectTrafficHy2QuotaKick(t *testing.T) {
+	st := openApplyTestStore(t)
+	ctx := context.Background()
+	uid := uuid.New()
+	agent := &fakeAgent{
+		listen: true,
+		hy2Stats: []map[string]any{
+			{"email": uid.String(), "uplink": 60, "downlink": 50},
+		},
+	}
+	ts := httptest.NewServer(agent.handler())
+	t.Cleanup(ts.Close)
+	host, port := mustHostPort(t, ts.URL)
+
+	g, err := st.CreateGroup(ctx, "hy2q-"+uuid.NewString()[:8], []string{stack.FamilyHy2}, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteGroup(ctx, g.ID) })
+	u, err := st.CreateUser(ctx, store.User{
+		ID:          uid,
+		GroupID:     g.ID,
+		DisplayName: "hy2",
+		VlessUUID:   uuid.NewString(),
+		Hy2Password: "hy2pass",
+		TTUser:      "u1",
+		TTPassword:  "ttpass",
+		Status:      "active",
+		Total:       100,
+		SubToken:    "tok-" + uuid.NewString(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteUser(ctx, u.ID) })
+	n, err := st.CreateNode(ctx, store.Node{
+		ID:              uuid.New(),
+		Name:            "fake-" + uuid.NewString()[:8],
+		IPv4:            host,
+		Hostname:        "hy2.example",
+		ControlPort:     port,
+		Families:        []string{stack.FamilyHy2},
+		AppliedFamilies: []string{stack.FamilyHy2},
+		PortsJSON:       json.RawMessage(`{"hy2_udp":443}`),
+		Status:          "enrolled",
+		AgentToken:      "test-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteNode(ctx, n.ID) })
+	if err := st.SetNodeGroups(ctx, n.ID, []uuid.UUID{g.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(st, Config{AdminPassword: "x", SessionSecret: "y", PublicSubBase: "https://saturn.example"})
+	if _, _, err := s.applyStoredNode(ctx, n, true); err != nil {
+		t.Fatalf("create apply: %v", err)
+	}
+	if got := agent.hy2IDs(); len(got) != 1 || got[0] != uid.String() {
+		t.Fatalf("hy2 desired %v", got)
+	}
+
+	out := s.CollectTraffic(ctx)
+	if ok, _ := out["ok"].(bool); !ok {
+		t.Fatalf("collect %v", out)
+	}
+	got, err := st.User(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Upload+got.Download < 100 {
+		t.Fatalf("hy2 not credited %d/%d", got.Upload, got.Download)
+	}
+	if len(agent.hy2IDs()) != 0 {
+		t.Fatalf("quota left hy2 user on node: %v", agent.hy2IDs())
+	}
+	assertSub(t, s, u.SubToken, http.StatusOK, true)
+}
+
 func TestSweepExpireKicksOnce(t *testing.T) {
 	st := openApplyTestStore(t)
 	ctx := context.Background()
@@ -289,6 +369,133 @@ func TestSweepRetriesFailedKick(t *testing.T) {
 	}
 }
 
+func TestPatchNodeHostnameAndStack(t *testing.T) {
+	st := openApplyTestStore(t)
+	ctx := context.Background()
+	agent := &fakeAgent{listen: true}
+	tsAgent := httptest.NewServer(agent.handler())
+	t.Cleanup(tsAgent.Close)
+	host, port := mustHostPort(t, tsAgent.URL)
+
+	g, err := st.CreateGroup(ctx, "stack-"+uuid.NewString()[:8], []string{stack.FamilyVLESS, stack.FamilyHy2}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteGroup(ctx, g.ID) })
+	n, err := st.CreateNode(ctx, store.Node{
+		ID:              uuid.New(),
+		Name:            "fake-" + uuid.NewString()[:8],
+		IPv4:            host,
+		ControlPort:     port,
+		Families:        []string{stack.FamilyVLESS},
+		AppliedFamilies: []string{stack.FamilyVLESS},
+		PortsJSON:       json.RawMessage(`{"vless_tcp":443}`),
+		Status:          "enrolled",
+		AgentToken:      "test-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteNode(ctx, n.ID) })
+	if err := st.SetNodeGroups(ctx, n.ID, []uuid.UUID{g.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(st, Config{
+		AdminPassword: "x",
+		SessionSecret: "y",
+		PublicSubBase: "https://saturn.example",
+	})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	cookie := loginCookie(t, ts)
+
+	res := doJSON(t, http.MethodPut, ts.URL+"/v1/nodes/"+n.ID.String()+"/stack",
+		`{"families":["hy2"],"ports":{"hy2_udp":443}}`, cookie)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("stack without hostname status %d body %s", res.StatusCode, body)
+	}
+
+	res = doJSON(t, http.MethodPatch, ts.URL+"/v1/nodes/"+n.ID.String(),
+		`{"hostname":"titan.example"}`, cookie)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("patch hostname %d %s", res.StatusCode, body)
+	}
+	got, err := st.Node(ctx, n.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Hostname != "titan.example" {
+		t.Fatalf("hostname %q", got.Hostname)
+	}
+
+	res = doJSON(t, http.MethodPut, ts.URL+"/v1/nodes/"+n.ID.String()+"/stack",
+		`{"families":["hy2"],"ports":{"hy2_udp":443}}`, cookie)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("stack hy2 %d %s", res.StatusCode, body)
+	}
+	got, err = st.Node(ctx, n.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stack.HasFamily(got.Families, stack.FamilyHy2) || stack.HasFamily(got.Families, stack.FamilyVLESS) {
+		t.Fatalf("families %v", got.Families)
+	}
+
+	res = doJSON(t, http.MethodPost, ts.URL+"/v1/nodes/apply-all", `{}`, cookie)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("apply-all %d %s", res.StatusCode, body)
+	}
+	var out struct {
+		Applied int `json:"applied_nodes"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Applied < 1 {
+		t.Fatalf("apply-all applied %d", out.Applied)
+	}
+}
+
+func loginCookie(t *testing.T, ts *httptest.Server) *http.Cookie {
+	t.Helper()
+	res, err := http.Post(ts.URL+"/v1/auth/login", "application/json", strings.NewReader(`{"password":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	for _, c := range res.Cookies() {
+		if c.Name == "plane_session" {
+			return c
+		}
+	}
+	t.Fatal("no session cookie")
+	return nil
+}
+
+func doJSON(t *testing.T, method, rawURL, body string, cookie *http.Cookie) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, rawURL, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
 func assertSub(t *testing.T, s *Server, token string, wantStatus int, wantEmpty bool) {
 	t.Helper()
 	ts := httptest.NewServer(s.Handler())
@@ -308,11 +515,13 @@ func assertSub(t *testing.T, s *Server, token string, wantStatus int, wantEmpty 
 }
 
 type fakeAgent struct {
-	mu      sync.Mutex
-	last    desired.State
-	listen  bool
-	puts    int
-	failPut bool
+	mu        sync.Mutex
+	last      desired.State
+	listen    bool
+	puts      int
+	failPut   bool
+	hy2Stats  []map[string]any
+	xrayStats []map[string]any
 }
 
 func (a *fakeAgent) putCount() int {
@@ -325,6 +534,19 @@ func (a *fakeAgent) setFailPut(v bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.failPut = v
+}
+
+func (a *fakeAgent) hy2IDs() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.last.Hy2 == nil {
+		return nil
+	}
+	out := make([]string, 0, len(a.last.Hy2.Users))
+	for _, u := range a.last.Hy2.Users {
+		out = append(out, u.ID)
+	}
+	return out
 }
 
 func (a *fakeAgent) vlessIDs() []string {
@@ -343,7 +565,20 @@ func (a *fakeAgent) vlessIDs() []string {
 func (a *fakeAgent) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "xray_listen": a.listen})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "xray_listen": a.listen, "hy2_listen": a.listen})
+	})
+	mux.HandleFunc("GET /v1/stats", func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		xray := a.xrayStats
+		hy2 := a.hy2Stats
+		a.mu.Unlock()
+		if xray == nil {
+			xray = []map[string]any{}
+		}
+		if hy2 == nil {
+			hy2 = []map[string]any{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "users": xray, "hy2_users": hy2})
 	})
 	mux.HandleFunc("PUT /v1/desired", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -362,7 +597,7 @@ func (a *fakeAgent) handler() http.Handler {
 		a.mu.Lock()
 		a.last = st
 		a.mu.Unlock()
-		writeJSON(w, http.StatusOK, desired.ApplyResult{OK: true, XrayListen: a.listen, Detail: "fake"})
+		writeJSON(w, http.StatusOK, desired.ApplyResult{OK: true, XrayListen: a.listen, Hy2Listen: a.listen, Detail: "fake"})
 	})
 	return mux
 }

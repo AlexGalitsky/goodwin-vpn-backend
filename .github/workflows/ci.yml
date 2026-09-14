@@ -30,6 +30,32 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://plane:plane@127.0.0.1:5432/plane?sslmode=disable
 
+  backup:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: plane
+          POSTGRES_PASSWORD: plane
+          POSTGRES_DB: plane
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U plane -d plane"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - run: node tools/pg_dump_plane_test.mjs
+        env:
+          TEST_DATABASE_URL: postgres://plane:plane@127.0.0.1:5432/plane?sslmode=disable
+
   admin:
     runs-on: ubuntu-latest
     defaults:

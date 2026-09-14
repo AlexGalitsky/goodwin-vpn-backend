@@ -148,6 +148,7 @@ PUBLIC_SUB_BASE=${publicBase}
 ADMIN_PASSWORD=${adminPassword}
 SESSION_SECRET=${sessionSecret}
 SEED_DEV=${process.env.SEED_DEV || prev.SEED_DEV || "0"}
+ALERT_WEBHOOK=${process.env.ALERT_WEBHOOK || prev.ALERT_WEBHOOK || ""}
 POSTGRES_PASSWORD=${dbPass}
 DATABASE_URL=postgres://plane:${dbPass}@127.0.0.1:5432/plane?sslmode=disable
 HOME=/root
@@ -226,9 +227,11 @@ writeFileSync(
   "/etc/systemd/system/goodwin-plane-pgdump.service",
   `[Unit]
 Description=Goodwin plane Postgres dump
+After=docker.service
 
 [Service]
 Type=oneshot
+EnvironmentFile=${envPath}
 Environment=PLANE_PREFIX=${prefix}
 ExecStart=/usr/bin/node ${dumpScript}
 `,
@@ -267,6 +270,7 @@ Plane installed/updated
   env:     ${envPath}
   public:  ${publicBase}
   login:   ${publicBase.replace(/\/$/, "")}/
+  backup:  /var/backups/goodwin-plane (timer 03:17)
 `);
 if (!publicBase.startsWith("https://")) {
   console.log("WARNING: PUBLIC_SUB_BASE is not HTTPS — the Flutter app will reject /sub URLs.");
