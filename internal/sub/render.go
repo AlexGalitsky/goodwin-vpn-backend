@@ -1,6 +1,8 @@
 package sub
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -22,27 +24,35 @@ type Headers struct {
 }
 
 type User struct {
-	DisplayName string
-	VlessUUID   string
-	Hy2Password string
-	TTUser      string
-	TTPassword  string
-	TTLink      string
-	Upload      int64
-	Download    int64
-	Total       int64
-	Expire      *time.Time
-	Status      string
+	DisplayName    string
+	VlessUUID      string
+	Hy2Password    string
+	TTUser         string
+	TTPassword     string
+	TTLink         string
+	TrojanPassword string
+	SsPassword     string
+	Upload         int64
+	Download       int64
+	Total          int64
+	Expire         *time.Time
+	Status         string
 }
 
 type NodeLine struct {
-	Name    string
-	Host    string
-	Family  string
-	Port    int
-	Reality *Reality
-	Hy2SNI  string
-	TTLink  string
+	Name     string
+	Host     string
+	Family   string
+	Port     int
+	Reality  *Reality
+	Security string // tls for non-reality vless/vmess/trojan
+	TLSSni   string
+	Network  string
+	Path     string
+	WSHost   string
+	Method   string // shadowsocks
+	Hy2SNI   string
+	TTLink   string
 }
 
 type Reality struct {
@@ -106,22 +116,25 @@ func shareLink(user User, line NodeLine) (string, error) {
 		name = host
 	}
 	frag := url.QueryEscape(name)
+	port := line.Port
+	if port <= 0 {
+		port = 443
+	}
 	switch line.Family {
 	case stack.FamilyVLESS:
 		if strings.TrimSpace(user.VlessUUID) == "" {
 			return "", nil
 		}
-		port := line.Port
-		if port <= 0 {
-			port = 443
-		}
 		q := url.Values{}
 		q.Set("encryption", "none")
-		network := "tcp"
-		if line.Reality != nil && line.Reality.PublicKey != "" {
-			network = "grpc"
-			if line.Reality.Network != "" {
-				network = line.Reality.Network
+		network := line.Network
+		if network == "" {
+			network = "tcp"
+			if line.Reality != nil && line.Reality.PublicKey != "" {
+				network = "grpc"
+				if line.Reality.Network != "" {
+					network = line.Reality.Network
+				}
 			}
 		}
 		q.Set("type", network)
@@ -150,17 +163,102 @@ func shareLink(user User, line NodeLine) (string, error) {
 			if line.Reality.Flow != "" {
 				q.Set("flow", line.Reality.Flow)
 			}
+		} else if line.Security == "tls" {
+			q.Set("security", "tls")
+			sni := line.TLSSni
+			if sni == "" {
+				sni = host
+			}
+			q.Set("sni", sni)
+			q.Set("fp", "chrome")
 		} else {
 			q.Set("security", "none")
 		}
+		if network == "ws" {
+			path := line.Path
+			if path == "" {
+				path = stack.WSPath
+			}
+			q.Set("path", path)
+			wsHost := line.WSHost
+			if wsHost == "" && line.Reality != nil && line.Reality.SNI != "" {
+				wsHost = line.Reality.SNI
+			}
+			if wsHost == "" {
+				wsHost = line.TLSSni
+			}
+			if wsHost != "" {
+				q.Set("host", wsHost)
+			}
+		}
 		return fmt.Sprintf("vless://%s@%s:%d?%s#%s", user.VlessUUID, host, port, q.Encode(), frag), nil
+	case stack.FamilyVMess:
+		if strings.TrimSpace(user.VlessUUID) == "" {
+			return "", nil
+		}
+		network := line.Network
+		if network == "" {
+			network = "ws"
+		}
+		sni := line.TLSSni
+		if sni == "" {
+			sni = host
+		}
+		path := line.Path
+		if path == "" {
+			path = stack.WSPath
+		}
+		obj := map[string]any{
+			"v":    "2",
+			"ps":   name,
+			"add":  host,
+			"port": port,
+			"id":   user.VlessUUID,
+			"aid":  0,
+			"scy":  "auto",
+			"net":  network,
+			"type": "none",
+			"host": sni,
+			"path": path,
+			"tls":  "tls",
+			"sni":  sni,
+			"fp":   "chrome",
+		}
+		raw, err := json.Marshal(obj)
+		if err != nil {
+			return "", err
+		}
+		return "vmess://" + base64.StdEncoding.EncodeToString(raw), nil
+	case stack.FamilyTrojan:
+		if strings.TrimSpace(user.TrojanPassword) == "" {
+			return "", nil
+		}
+		q := url.Values{}
+		q.Set("security", "tls")
+		sni := line.TLSSni
+		if sni == "" {
+			sni = host
+		}
+		q.Set("sni", sni)
+		q.Set("fp", "chrome")
+		q.Set("type", "tcp")
+		pass := url.PathEscape(user.TrojanPassword)
+		return fmt.Sprintf("trojan://%s@%s:%d?%s#%s", pass, host, port, q.Encode(), frag), nil
+	case stack.FamilySS:
+		if strings.TrimSpace(user.SsPassword) == "" {
+			return "", nil
+		}
+		method := line.Method
+		if method == "" {
+			method = stack.DefaultSSMethod
+		}
+		userinfo := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(
+			[]byte(method + ":" + user.SsPassword),
+		)
+		return fmt.Sprintf("ss://%s@%s:%d#%s", userinfo, host, port, frag), nil
 	case stack.FamilyHy2:
 		if strings.TrimSpace(user.Hy2Password) == "" {
 			return "", nil
-		}
-		port := line.Port
-		if port <= 0 {
-			port = 443
 		}
 		q := url.Values{}
 		sni := line.Hy2SNI

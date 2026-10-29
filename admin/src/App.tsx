@@ -24,7 +24,25 @@ type UserRow = {
   sub_url: string;
   import_url: string;
 };
-type NodePorts = { vless_tcp?: number; hy2_udp?: number; tt?: number };
+type XrayListen = {
+  protocol: string;
+  security?: string;
+  network?: string;
+  port: number;
+  method?: string;
+  service_name?: string;
+  flow?: string;
+  path?: string;
+  host?: string;
+  label?: string;
+};
+type NodePorts = {
+  vless_tcp?: number;
+  hy2_udp?: number;
+  tt?: number;
+  xray?: XrayListen[];
+  vless?: XrayListen[];
+};
 type NodeRow = {
   ID: string;
   Name: string;
@@ -81,15 +99,28 @@ type FleetNode = {
 const GiB = 1024 * 1024 * 1024;
 const FAMILIES = [
   { id: "vless", label: "VLESS" },
+  { id: "vmess", label: "VMess" },
+  { id: "trojan", label: "Trojan" },
+  { id: "ss", label: "Shadowsocks" },
   { id: "hy2", label: "Hysteria2" },
   { id: "tt", label: "TrustTunnel" },
 ] as const;
 
+function xrayCount(ports?: NodePorts): number {
+  return (ports?.xray || ports?.vless || []).length;
+}
+
 function familyPreset(families: string[], ports?: NodePorts): string {
   const set = new Set(families || []);
+  const n = xrayCount(ports);
+  if (set.has("vmess") || set.has("trojan") || set.has("ss")) return "review";
+  if (set.size === 1 && set.has("vless") && n === 3) return "stealth-full";
+  if (set.size === 1 && set.has("vless") && n === 2) return "stealth-dual";
   if (set.size === 1 && set.has("vless")) return "stealth";
   if (set.size === 1 && set.has("hy2")) return "hy2";
   if (set.size === 1 && set.has("tt")) return "tt";
+  if (set.has("vless") && set.has("hy2") && set.has("tt") && n === 3) return "max-full";
+  if (set.has("vless") && set.has("hy2") && set.has("tt") && n === 2) return "max-dual";
   if ((ports?.tt ?? 0) === 443 && ((ports?.vless_tcp ?? 0) === 8443 || (ports?.hy2_udp ?? 0) === 8443)) {
     return "tt-first";
   }
@@ -101,20 +132,97 @@ function nodeDraftKey(n: NodeRow): string {
   return `${(n.Hostname || "").trim()}\0${familyPreset(n.Families || [], n.ports)}\0${groups}`;
 }
 
-function specForPreset(preset: string): { families: string[]; ports: Record<string, number> } {
+function vlessRealityGrpc(port: number): XrayListen {
+  return { protocol: "vless", security: "reality", network: "grpc", port, service_name: "goodwin", label: "grpc" };
+}
+function vlessRealityVision(port: number): XrayListen {
+  return {
+    protocol: "vless",
+    security: "reality",
+    network: "tcp",
+    port,
+    flow: "xtls-rprx-vision",
+    label: "tcp",
+  };
+}
+function vlessRealityWs(port: number): XrayListen {
+  return { protocol: "vless", security: "reality", network: "ws", port, path: "/goodwin", label: "ws" };
+}
+
+function specForPreset(preset: string): { families: string[]; ports: NodePorts } {
   switch (preset) {
     case "stealth":
       return { families: ["vless"], ports: { vless_tcp: 443 } };
+    case "stealth-dual":
+      return {
+        families: ["vless"],
+        ports: { xray: [vlessRealityGrpc(443), vlessRealityVision(9443)] },
+      };
+    case "stealth-full":
+      return {
+        families: ["vless"],
+        ports: { xray: [vlessRealityGrpc(443), vlessRealityVision(9443), vlessRealityWs(2083)] },
+      };
     case "hy2":
       return { families: ["hy2"], ports: { hy2_udp: 443 } };
     case "tt":
       return { families: ["tt"], ports: { tt: 443 } };
     case "tt-first":
       return { families: ["vless", "hy2", "tt"], ports: { vless_tcp: 8443, hy2_udp: 8443, tt: 443 } };
+    case "max-dual":
+      return {
+        families: ["vless", "hy2", "tt"],
+        ports: {
+          xray: [vlessRealityGrpc(443), vlessRealityVision(9443)],
+          hy2_udp: 443,
+          tt: 8443,
+        },
+      };
+    case "max-full":
+      return {
+        families: ["vless", "hy2", "tt"],
+        ports: {
+          xray: [vlessRealityGrpc(443), vlessRealityVision(9443), vlessRealityWs(2083)],
+          hy2_udp: 443,
+          tt: 8443,
+        },
+      };
+    case "review":
+      return {
+        families: ["vless", "vmess", "trojan", "ss", "hy2", "tt"],
+        ports: {
+          xray: [
+            vlessRealityGrpc(443),
+            vlessRealityVision(9443),
+            vlessRealityWs(2083),
+            { protocol: "vless", security: "tls", network: "tcp", port: 10443, label: "vless-tls" },
+            { protocol: "vmess", security: "tls", network: "ws", port: 2096, path: "/goodwin", label: "vmess" },
+            { protocol: "trojan", security: "tls", network: "tcp", port: 10444, label: "trojan" },
+            { protocol: "shadowsocks", network: "tcp", port: 8388, method: "aes-256-gcm", label: "ss" },
+          ],
+          hy2_udp: 443,
+          tt: 8443,
+        },
+      };
     default:
       return { families: ["vless", "hy2", "tt"], ports: { vless_tcp: 443, hy2_udp: 443, tt: 8443 } };
   }
 }
+
+const PRESET_OPTIONS = (
+  <>
+    <option value="max">max (все три)</option>
+    <option value="max-dual">max-dual (+tcp vision)</option>
+    <option value="max-full">max-full (+ws)</option>
+    <option value="review">review (все протоколы)</option>
+    <option value="tt-first">TT-first</option>
+    <option value="stealth">только VLESS</option>
+    <option value="stealth-dual">stealth-dual</option>
+    <option value="stealth-full">stealth-full</option>
+    <option value="hy2">только Hy2</option>
+    <option value="tt">только TT</option>
+  </>
+);
 const TABS = [
   { id: "overview", label: "Обзор" },
   { id: "nodes", label: "Ноды" },
@@ -579,7 +687,9 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
     <div className="grid">
       <form className="card grid" onSubmit={create}>
         <h2>Новая нода</h2>
-        <p className="muted">IPv4 и токен с VPS. Пресет max: VLESS 443/tcp, Hy2 443/udp, TT 8443.</p>
+        <p className="muted">
+          IPv4 и токен с VPS. max: VLESS 443/tcp, Hy2 443/udp, TT 8443. review: + vision/ws/tls/vmess/trojan/ss.
+        </p>
         <label>
           Имя
           <input value={name} onChange={(e) => setName(e.target.value)} required />
@@ -593,7 +703,7 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
           <input
             value={hostname}
             onChange={(e) => setHostname(e.target.value)}
-            required={preset !== "stealth"}
+            required={preset !== "stealth" && !preset.startsWith("stealth-")}
           />
         </label>
         <label>
@@ -607,11 +717,7 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
         <label>
           Пресет
           <select value={preset} onChange={(e) => setPreset(e.target.value)}>
-            <option value="max">max (все три)</option>
-            <option value="tt-first">TT-first</option>
-            <option value="stealth">только VLESS</option>
-            <option value="hy2">только Hy2</option>
-            <option value="tt">только TT</option>
+            {PRESET_OPTIONS}
           </select>
         </label>
         <div>
@@ -705,11 +811,7 @@ function Nodes({ onError }: { onError: (s: string) => void }) {
                       }}
                       style={{ marginTop: 4, width: "100%" }}
                     >
-                      <option value="max">max (все три)</option>
-                      <option value="tt-first">TT-first</option>
-                      <option value="stealth">только VLESS</option>
-                      <option value="hy2">только Hy2</option>
-                      <option value="tt">только TT</option>
+                      {PRESET_OPTIONS}
                     </select>
                     {applyLog[n.ID] ? <div className="apply-log">{applyLog[n.ID]}</div> : null}
                   </td>

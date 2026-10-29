@@ -103,6 +103,8 @@ type User struct {
 	Hy2Password      string `json:"-"`
 	TTUser           string `json:"-"`
 	TTPassword       string `json:"-"`
+	TrojanPassword   string `json:"-"`
+	SsPassword       string `json:"-"`
 	Upload           int64
 	Download         int64
 	Total            int64
@@ -124,11 +126,13 @@ type AuditEvent struct {
 }
 
 const userCols = `id, group_id, display_name, vless_uuid, hy2_password, tt_user, tt_password,
+			trojan_password, ss_password,
 			upload, download, total, expire, status, sub_token, note, quota_reset, quota_period_start`
 
 func scanUser(sc interface{ Scan(dest ...any) error }) (User, error) {
 	var u User
 	err := sc.Scan(&u.ID, &u.GroupID, &u.DisplayName, &u.VlessUUID, &u.Hy2Password, &u.TTUser, &u.TTPassword,
+		&u.TrojanPassword, &u.SsPassword,
 		&u.Upload, &u.Download, &u.Total, &u.Expire, &u.Status, &u.SubToken, &u.Note, &u.QuotaReset, &u.QuotaPeriodStart)
 	return u, err
 }
@@ -208,9 +212,11 @@ func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO users (
 			id, group_id, display_name, vless_uuid, hy2_password, tt_user, tt_password,
+			trojan_password, ss_password,
 			upload, download, total, expire, status, sub_token, note, quota_reset, quota_period_start
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		u.ID, u.GroupID, u.DisplayName, u.VlessUUID, u.Hy2Password, u.TTUser, u.TTPassword,
+		u.TrojanPassword, u.SsPassword,
 		u.Upload, u.Download, u.Total, u.Expire, u.Status, u.SubToken, u.Note, u.QuotaReset, u.QuotaPeriodStart,
 	)
 	return u, err
@@ -582,14 +588,16 @@ func (s *Store) SeedDev(ctx context.Context) error {
 		return err
 	}
 	_, err = s.CreateUser(ctx, User{
-		GroupID:     g.ID,
-		DisplayName: "dev",
-		VlessUUID:   "11111111-2222-3333-4444-555555555555",
-		Hy2Password: "dev-hy2",
-		TTUser:      "dev",
-		TTPassword:  "dev-tt",
-		Status:      "active",
-		SubToken:    "dev-sub-token",
+		GroupID:        g.ID,
+		DisplayName:    "dev",
+		VlessUUID:      "11111111-2222-3333-4444-555555555555",
+		Hy2Password:    "dev-hy2",
+		TTUser:         "dev",
+		TTPassword:     "dev-tt",
+		TrojanPassword: "dev-trojan",
+		SsPassword:     "dev-ss-password",
+		Status:         "active",
+		SubToken:       "dev-sub-token",
 	})
 	return err
 }

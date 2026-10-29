@@ -240,9 +240,8 @@ func (s *Server) desired(w http.ResponseWriter, r *http.Request) {
 }
 
 func applyVLESS(ctx context.Context, prefix string, v desired.VLESS) (desired.ApplyResult, error) {
-	if v.Port <= 0 {
-		v.Port = 443
-	}
+	primary := xrayconf.PrimaryPort(v)
+	v.Port = primary
 	dir := filepath.Join(prefix, "xray")
 	bin, err := xrayrun.EnsureBinary(ctx, dir)
 	if err != nil {
@@ -261,11 +260,17 @@ func applyVLESS(ctx context.Context, prefix string, v desired.VLESS) (desired.Ap
 			return desired.ApplyResult{}, err
 		}
 	}
-	if err := xrayrun.WriteConfig(filepath.Join(prefix, "xray.port"), []byte(fmt.Sprintf("%d\n", v.Port))); err != nil {
+	if err := xrayrun.WriteConfig(filepath.Join(prefix, "xray.port"), []byte(fmt.Sprintf("%d\n", primary))); err != nil {
 		return desired.ApplyResult{}, err
 	}
 	time.Sleep(400 * time.Millisecond)
-	listen := xrayrun.ListeningWait(v.Port, 8)
+	listen := true
+	for _, p := range xrayconf.AllPorts(v) {
+		if !xrayrun.ListeningWait(p, 8) {
+			listen = false
+			break
+		}
+	}
 	return desired.ApplyResult{
 		OK:          listen,
 		XrayListen:  listen,

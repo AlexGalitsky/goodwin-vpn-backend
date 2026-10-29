@@ -89,6 +89,46 @@ func TestRealityGRPCLink(t *testing.T) {
 	}
 }
 
+func TestReviewShareMatrix(t *testing.T) {
+	got, err := Render(User{
+		VlessUUID:      "11111111-2222-3333-4444-555555555555",
+		TrojanPassword: "trojan-secret",
+		SsPassword:     "ss-secret",
+		Status:         "active",
+	}, []NodeLine{
+		{
+			Name: "N-grpc", Host: "n.example.com", Family: "vless", Port: 443, Network: "grpc",
+			Reality: &Reality{SNI: "www.cloudflare.com", PublicKey: "PUBLIC", ShortID: "abcd", Network: "grpc", ServiceName: "goodwin", FP: "chrome"},
+		},
+		{
+			Name: "N-tcp", Host: "n.example.com", Family: "vless", Port: 9443, Network: "tcp",
+			Reality: &Reality{SNI: "www.cloudflare.com", PublicKey: "PUBLIC", ShortID: "abcd", Network: "tcp", Flow: "xtls-rprx-vision", FP: "chrome"},
+		},
+		{Name: "N-tls", Host: "n.example.com", Family: "vless", Port: 10443, Network: "tcp", Security: "tls", TLSSni: "n.example.com"},
+		{Name: "N-vmess", Host: "n.example.com", Family: "vmess", Port: 2096, Network: "ws", Path: "/goodwin", TLSSni: "n.example.com"},
+		{Name: "N-trojan", Host: "n.example.com", Family: "trojan", Port: 10444, TLSSni: "n.example.com"},
+		{Name: "N-ss", Host: "n.example.com", Family: "ss", Port: 8388, Method: "aes-256-gcm"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Body, "flow=xtls-rprx-vision") {
+		t.Fatalf("vision %s", got.Body)
+	}
+	if !strings.Contains(got.Body, "vmess://") {
+		t.Fatalf("vmess %s", got.Body)
+	}
+	if !strings.Contains(got.Body, "trojan://") {
+		t.Fatalf("trojan %s", got.Body)
+	}
+	if !strings.Contains(got.Body, "ss://") {
+		t.Fatalf("ss %s", got.Body)
+	}
+	if !strings.Contains(got.Body, "security=tls") {
+		t.Fatalf("tls vless %s", got.Body)
+	}
+}
+
 func TestWriteHeadersUserinfo(t *testing.T) {
 	h := map[string]string{}
 	WriteHeaders(h, Headers{

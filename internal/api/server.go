@@ -860,17 +860,19 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		u := store.User{
-			GroupID:     gid,
-			DisplayName: name,
-			Note:        req.Note,
-			VlessUUID:   uuid.NewString(),
-			Hy2Password: randomHex(12),
-			TTUser:      "u" + randomHex(4),
-			TTPassword:  randomHex(12),
-			Total:       g.QuotaBytes,
-			Status:      "active",
-			SubToken:    token,
-			QuotaReset:  g.QuotaReset,
+			GroupID:        gid,
+			DisplayName:    name,
+			Note:           req.Note,
+			VlessUUID:      uuid.NewString(),
+			Hy2Password:    randomHex(12),
+			TTUser:         "u" + randomHex(4),
+			TTPassword:     randomHex(12),
+			TrojanPassword: randomHex(12),
+			SsPassword:     randomHex(16),
+			Total:          g.QuotaBytes,
+			Status:         "active",
+			SubToken:       token,
+			QuotaReset:     g.QuotaReset,
 		}
 		if req.QuotaReset != nil {
 			kind, err := sub.ParseQuotaReset(*req.QuotaReset)
@@ -1277,8 +1279,8 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if stack.NeedsHostname(spec.Families) && strings.TrimSpace(req.Hostname) == "" {
-		writeErr(w, http.StatusBadRequest, "hostname required for hy2/tt (Let's Encrypt SAN)")
+	if (stack.NeedsHostname(spec.Families) || stack.NeedsTLSCert(spec.Ports)) && strings.TrimSpace(req.Hostname) == "" {
+		writeErr(w, http.StatusBadRequest, "hostname required for hy2/tt/tls (Let's Encrypt SAN)")
 		return
 	}
 	ports, _ := json.Marshal(spec.Ports)
@@ -1610,17 +1612,27 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 	}
 
 	wantVLESS := stack.HasFamily(n.Families, stack.FamilyVLESS)
+	wantVMess := stack.HasFamily(n.Families, stack.FamilyVMess)
+	wantTrojan := stack.HasFamily(n.Families, stack.FamilyTrojan)
+	wantSS := stack.HasFamily(n.Families, stack.FamilySS)
 	wantHy2 := stack.HasFamily(n.Families, stack.FamilyHy2)
 	wantTT := stack.HasFamily(n.Families, stack.FamilyTT)
-	if (wantHy2 || wantTT) && strings.TrimSpace(n.Hostname) == "" {
-		return nil, http.StatusBadRequest, errors.New("hostname required for hy2/tt (Let's Encrypt SAN)")
+	wantXray := wantVLESS || wantVMess || wantTrojan || wantSS
+	xrayListens := stack.ResolveXray(ports)
+	needHost := wantHy2 || wantTT || stack.NeedsTLSCert(ports) || wantVMess || wantTrojan
+	if needHost && strings.TrimSpace(n.Hostname) == "" {
+		return nil, http.StatusBadRequest, errors.New("hostname required for hy2/tt/tls (Let's Encrypt SAN)")
 	}
 
 	now := time.Now()
 	clients := []desired.VLESSClient{}
+	trojanUsers := []desired.TrojanUser{}
+	ssUsers := []desired.SSUser{}
 	hy2Users := []desired.Hy2User{}
 	ttUsers := []desired.TTUser{}
 	seenVless := map[string]bool{}
+	seenTrojan := map[string]bool{}
+	seenSS := map[string]bool{}
 	seenHy2 := map[string]bool{}
 	seenTT := map[string]bool{}
 	for _, gid := range gids {
@@ -1632,7 +1644,9 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 		if err != nil {
 			return nil, http.StatusInternalServerError, err
 		}
-		if wantVLESS && stack.HasFamily(g.Protocols, stack.FamilyVLESS) {
+		needUUID := (wantVLESS && stack.HasFamily(g.Protocols, stack.FamilyVLESS)) ||
+			(wantVMess && stack.HasFamily(g.Protocols, stack.FamilyVMess))
+		if needUUID {
 			for _, u := range users {
 				if !sub.Entitled(u.Status, u.Expire, u.Upload, u.Download, u.Total, now) {
 					continue
@@ -1642,6 +1656,30 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 				}
 				seenVless[u.VlessUUID] = true
 				clients = append(clients, desired.VLESSClient{ID: u.VlessUUID, Email: u.ID.String()})
+			}
+		}
+		if wantTrojan && stack.HasFamily(g.Protocols, stack.FamilyTrojan) {
+			for _, u := range users {
+				if !sub.Entitled(u.Status, u.Expire, u.Upload, u.Download, u.Total, now) {
+					continue
+				}
+				if strings.TrimSpace(u.TrojanPassword) == "" || seenTrojan[u.TrojanPassword] {
+					continue
+				}
+				seenTrojan[u.TrojanPassword] = true
+				trojanUsers = append(trojanUsers, desired.TrojanUser{ID: u.ID.String(), Password: u.TrojanPassword, Email: u.ID.String()})
+			}
+		}
+		if wantSS && stack.HasFamily(g.Protocols, stack.FamilySS) {
+			for _, u := range users {
+				if !sub.Entitled(u.Status, u.Expire, u.Upload, u.Download, u.Total, now) {
+					continue
+				}
+				if strings.TrimSpace(u.SsPassword) == "" || seenSS[u.SsPassword] {
+					continue
+				}
+				seenSS[u.SsPassword] = true
+				ssUsers = append(ssUsers, desired.SSUser{ID: u.ID.String(), Password: u.SsPassword, Email: u.ID.String()})
 			}
 		}
 		if wantHy2 && stack.HasFamily(g.Protocols, stack.FamilyHy2) {
@@ -1671,21 +1709,36 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 	}
 
 	st := desired.State{}
-	if wantVLESS {
+	if wantXray && len(xrayListens) > 0 {
 		keys, err := s.ensureReality(ctx)
 		if err != nil {
 			return nil, http.StatusInternalServerError, err
 		}
-		port := ports.VlessTCP
-		if port <= 0 {
-			port = 443
+		inbounds := make([]desired.XrayInbound, 0, len(xrayListens))
+		for _, l := range xrayListens {
+			inbounds = append(inbounds, desired.XrayInbound{
+				Protocol:    l.Protocol,
+				Security:    l.Security,
+				Network:     l.Network,
+				Port:        l.Port,
+				Method:      l.Method,
+				ServiceName: l.ServiceName,
+				Flow:        l.Flow,
+				Path:        l.Path,
+				Host:        l.Host,
+				Label:       l.Label,
+			})
 		}
 		st.VLESS = &desired.VLESS{
-			Port:        port,
+			Port:        xrayconf.PrimaryPort(desired.VLESS{Inbounds: inbounds, Port: ports.VlessTCP}),
 			Network:     "grpc",
 			ServiceName: xrayconf.GRPCService,
 			Reality:     keys,
+			Hostname:    n.Hostname,
 			Clients:     clients,
+			TrojanUsers: trojanUsers,
+			SSUsers:     ssUsers,
+			Inbounds:    inbounds,
 		}
 	}
 	if wantHy2 {
@@ -1728,7 +1781,18 @@ func (s *Server) applyStoredNode(ctx context.Context, n store.Node, allowEmpty b
 	}
 	fams := []string{}
 	if res.XrayListen {
-		fams = append(fams, stack.FamilyVLESS)
+		seenFam := map[string]bool{}
+		for _, l := range xrayListens {
+			f := stack.FamilyForListen(l)
+			if !stack.HasFamily(n.Families, f) || seenFam[f] {
+				continue
+			}
+			seenFam[f] = true
+			fams = append(fams, f)
+		}
+		if len(seenFam) == 0 && wantVLESS {
+			fams = append(fams, stack.FamilyVLESS)
+		}
 	}
 	if res.Hy2Listen {
 		fams = append(fams, stack.FamilyHy2)
@@ -1974,14 +2038,68 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 		if len(fams) == 0 {
 			continue
 		}
+		xrayListens := stack.ResolveXray(ports)
+		for _, l := range xrayListens {
+			fam := stack.FamilyForListen(l)
+			if !stack.HasFamily(fams, fam) || !stack.HasFamily(g.Protocols, fam) {
+				continue
+			}
+			name := n.Name
+			if l.Label != "" {
+				name = n.Name + "-" + l.Label
+			}
+			line := sub.NodeLine{
+				Name:    name,
+				Host:    host,
+				Family:  fam,
+				Port:    l.Port,
+				Network: l.Network,
+				Path:    l.Path,
+				WSHost:  l.Host,
+				Method:  l.Method,
+				Hy2SNI:  n.Hostname,
+			}
+			if fam == stack.FamilyVLESS {
+				sec := l.Security
+				if sec == "" {
+					sec = "reality"
+				}
+				line.Security = sec
+				if sec == "reality" && rk != nil {
+					r := *rk
+					r.Network = l.Network
+					r.ServiceName = l.ServiceName
+					r.Flow = l.Flow
+					line.Reality = &r
+				} else if sec == "tls" {
+					line.TLSSni = n.Hostname
+				}
+			}
+			if fam == stack.FamilyVMess {
+				line.Security = "tls"
+				line.TLSSni = n.Hostname
+				if l.Path == "" {
+					line.Path = stack.WSPath
+				}
+			}
+			if fam == stack.FamilyTrojan {
+				line.Security = "tls"
+				line.TLSSni = n.Hostname
+			}
+			if fam == stack.FamilySS && line.Method == "" {
+				line.Method = stack.DefaultSSMethod
+			}
+			lines = append(lines, line)
+		}
 		for _, fam := range fams {
+			if fam == stack.FamilyVLESS || fam == stack.FamilyVMess || fam == stack.FamilyTrojan || fam == stack.FamilySS {
+				continue
+			}
 			if !stack.HasFamily(g.Protocols, fam) {
 				continue
 			}
 			port := 443
 			switch fam {
-			case stack.FamilyVLESS:
-				port = ports.VlessTCP
 			case stack.FamilyHy2:
 				port = ports.Hy2UDP
 			case stack.FamilyTT:
@@ -1993,9 +2111,6 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 				Family: fam,
 				Port:   port,
 				Hy2SNI: n.Hostname,
-			}
-			if fam == stack.FamilyVLESS && rk != nil {
-				line.Reality = rk
 			}
 			if fam == stack.FamilyTT {
 				link, err := s.store.TTLink(ctx, n.ID, u.ID)
@@ -2011,16 +2126,18 @@ func (s *Server) renderUser(ctx context.Context, u store.User) (string, sub.Head
 		return "", hdr, http.StatusOK, nil
 	}
 	res, err := sub.Render(sub.User{
-		DisplayName: u.DisplayName,
-		VlessUUID:   u.VlessUUID,
-		Hy2Password: u.Hy2Password,
-		TTUser:      u.TTUser,
-		TTPassword:  u.TTPassword,
-		Upload:      u.Upload,
-		Download:    u.Download,
-		Total:       u.Total,
-		Expire:      u.Expire,
-		Status:      u.Status,
+		DisplayName:    u.DisplayName,
+		VlessUUID:      u.VlessUUID,
+		Hy2Password:    u.Hy2Password,
+		TTUser:         u.TTUser,
+		TTPassword:     u.TTPassword,
+		TrojanPassword: u.TrojanPassword,
+		SsPassword:     u.SsPassword,
+		Upload:         u.Upload,
+		Download:       u.Download,
+		Total:          u.Total,
+		Expire:         u.Expire,
+		Status:         u.Status,
 	}, lines)
 	if err != nil {
 		if strings.Contains(err.Error(), "no share links") {

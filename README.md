@@ -44,3 +44,4 @@ curl -fsSL https://raw.githubusercontent.com/AlexGalitsky/goodwin-vpn-backend/ma
 
 In admin, enroll the node with that hostname and token, save, then Apply.
 Preset max: VLESS REALITY TCP 443, Hysteria2 UDP 443, TrustTunnel TCP+UDP 8443.
+Preset review: + VLESS vision 9443 / WS 2083 / TLS 10443, VMess 2096, Trojan 10444, SS 8388.
