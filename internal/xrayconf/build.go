@@ -168,24 +168,32 @@ func buildInbound(tag string, in desired.XrayInbound, v desired.VLESS, cert, key
 		if method == "" {
 			method = stack.DefaultSSMethod
 		}
+		// Recent Xray reads method from each client when "clients" is set;
+		// empty client method → "unsupported cipher method:".
 		clients := make([]map[string]any, 0, len(v.SSUsers))
 		for _, u := range v.SSUsers {
 			clients = append(clients, map[string]any{
 				"password": u.Password,
 				"email":    u.Email,
+				"method":   method,
 			})
+		}
+		settings := map[string]any{
+			"network": "tcp,udp",
+		}
+		if len(clients) > 0 {
+			settings["clients"] = clients
+			settings["method"] = method
+		} else {
+			settings["method"] = method
+			settings["password"] = firstSSPassword(v.SSUsers)
 		}
 		return map[string]any{
 			"tag":      tag,
 			"listen":   "0.0.0.0",
 			"port":     in.Port,
 			"protocol": "shadowsocks",
-			"settings": map[string]any{
-				"method":   method,
-				"password": firstSSPassword(v.SSUsers),
-				"clients":  clients,
-				"network":  "tcp,udp",
-			},
+			"settings": settings,
 		}, nil
 	case "trojan":
 		clients := make([]map[string]any, 0, len(v.TrojanUsers))

@@ -64,7 +64,7 @@ func DefaultPorts(preset string) Ports {
 		return Ports{Xray: []XrayListen{
 			vlessRealityGRPC(443),
 			vlessRealityVision(9443),
-			vlessRealityWS(2083),
+			vlessTLSWS(2083),
 		}}
 	case "max-dual":
 		return Ports{
@@ -80,7 +80,7 @@ func DefaultPorts(preset string) Ports {
 			Xray: []XrayListen{
 				vlessRealityGRPC(443),
 				vlessRealityVision(9443),
-				vlessRealityWS(2083),
+				vlessTLSWS(2083),
 			},
 			Hy2UDP: 443,
 			TT:     8443,
@@ -90,7 +90,7 @@ func DefaultPorts(preset string) Ports {
 			Xray: []XrayListen{
 				vlessRealityGRPC(443),
 				vlessRealityVision(9443),
-				vlessRealityWS(2083),
+				vlessTLSWS(2083),
 				vlessTLS(10443),
 				vmessTLSWS(2096),
 				trojanTLS(10444),
@@ -135,9 +135,11 @@ func vlessRealityVision(port int) XrayListen {
 	}
 }
 
-func vlessRealityWS(port int) XrayListen {
+// Xray REALITY no longer allows WebSocket (only tcp/raw, gRPC, XHTTP).
+// Review/full presets use WS over TLS with the node LE cert instead.
+func vlessTLSWS(port int) XrayListen {
 	return XrayListen{
-		Protocol: FamilyVLESS, Security: "reality", Network: "ws", Port: port,
+		Protocol: FamilyVLESS, Security: "tls", Network: "ws", Port: port,
 		Path: WSPath, Label: "ws",
 	}
 }
@@ -379,6 +381,9 @@ func Validate(spec Spec) error {
 			if l.Protocol != FamilyVLESS || l.Security != "reality" || l.Network != "tcp" {
 				return fmt.Errorf("vision flow only on vless reality tcp")
 			}
+		}
+		if l.Security == "reality" && l.Network == "ws" {
+			return fmt.Errorf("REALITY does not support WebSocket — use tls+ws or reality+grpc/tcp")
 		}
 		if l.Protocol == FamilyVLESS && l.Network == "grpc" && l.Flow != "" {
 			return fmt.Errorf("grpc must not set vision flow")

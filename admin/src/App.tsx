@@ -145,8 +145,9 @@ function vlessRealityVision(port: number): XrayListen {
     label: "tcp",
   };
 }
-function vlessRealityWs(port: number): XrayListen {
-  return { protocol: "vless", security: "reality", network: "ws", port, path: "/goodwin", label: "ws" };
+function vlessTlsWs(port: number): XrayListen {
+  // Xray REALITY rejects WebSocket; WS uses LE TLS on the node hostname.
+  return { protocol: "vless", security: "tls", network: "ws", port, path: "/goodwin", label: "ws" };
 }
 
 function specForPreset(preset: string): { families: string[]; ports: NodePorts } {
@@ -161,7 +162,7 @@ function specForPreset(preset: string): { families: string[]; ports: NodePorts }
     case "stealth-full":
       return {
         families: ["vless"],
-        ports: { xray: [vlessRealityGrpc(443), vlessRealityVision(9443), vlessRealityWs(2083)] },
+        ports: { xray: [vlessRealityGrpc(443), vlessRealityVision(9443), vlessTlsWs(2083)] },
       };
     case "hy2":
       return { families: ["hy2"], ports: { hy2_udp: 443 } };
@@ -182,7 +183,7 @@ function specForPreset(preset: string): { families: string[]; ports: NodePorts }
       return {
         families: ["vless", "hy2", "tt"],
         ports: {
-          xray: [vlessRealityGrpc(443), vlessRealityVision(9443), vlessRealityWs(2083)],
+          xray: [vlessRealityGrpc(443), vlessRealityVision(9443), vlessTlsWs(2083)],
           hy2_udp: 443,
           tt: 8443,
         },
@@ -194,7 +195,7 @@ function specForPreset(preset: string): { families: string[]; ports: NodePorts }
           xray: [
             vlessRealityGrpc(443),
             vlessRealityVision(9443),
-            vlessRealityWs(2083),
+            vlessTlsWs(2083),
             { protocol: "vless", security: "tls", network: "tcp", port: 10443, label: "vless-tls" },
             { protocol: "vmess", security: "tls", network: "ws", port: 2096, path: "/goodwin", label: "vmess" },
             { protocol: "trojan", security: "tls", network: "tcp", port: 10444, label: "trojan" },
